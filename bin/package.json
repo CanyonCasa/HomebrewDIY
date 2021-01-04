@@ -1,0 +1,35 @@
+{
+  "name": "homebrewdiy",
+  "version": "1.0.0",
+  "description": "Do It Yourself Homebrew web server with minimal dependencies",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CanyonCasa/HomebrewDIY.git"
+  },
+  "keywords": [
+    "homebrew",
+    "web",
+    "server",
+    "DIY",
+    "NodeJS",
+    "node"
+  ],
+  "author": "CanyonCasa",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/CanyonCasa/HomebrewDIY/issues"
+  },
+  "homepage": "https://github.com/CanyonCasa/HomebrewDIY#readme",
+  "dependencies": {
+    "bcrypt": "^5.0.0",
+    "bcryptjs": "^2.4.3",
+    "http-proxy": "^1.18.1",
+    "jsonata": "^1.8.4",
+    "line-reader": "^0.4.0",
+    "path-to-regexp": "^6.2.0"
+  }
+}
