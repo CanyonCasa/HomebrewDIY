@@ -30,7 +30,7 @@ var helpers = { $VERSION: fs.statSync(process.argv[0]).mtime.toISOString() };   
  */
 helpers.asBytes = (b) => String(b).replace(/([\d.]+)([gmk]?)b?/i, (_m,n,l='')=>{
     let x=l.toLowerCase(); let y=n*(x==l?1000:1024)**(x=='g'?3:x=='m'?2:x=='k'?1:0); return Number(y); });
-
+    
 /**
  * @function asList coeorses an array or (comma) delimited string into an array
  * @params {string|[]} x - input array or (comma) delimited string
@@ -56,6 +56,15 @@ helpers.asStr = (x,delim=',') => x instanceof Array ? (x||'').join(delim) : x;
 helpers.asStyle = (styles,txt) => ansiStyle(helpers.asList(styles),txt);
 
 /**
+ * @function asTimeStr converts a time (difference) value in milliseconds into human readable string
+ * @param {integer} t - time (difference)
+ * @return {number} equivalent time in days, hours, minutes, and seconds
+ */
+helpers.asTimeStr = t => t>86400000 ? `${Math.floor(t/86400000)} days, ${helpers.asTimeStr(t%86400000)}` : 
+                         t>3600000 ? `${Math.floor(t/3600000)} hrs, ${helpers.asTimeStr(t%3600000)}` :
+                         t>60000 ? `${Math.floor(t/60000)} mins, ${helpers.asTimeStr(t%60000)}` : `${t/1000} secs`;
+
+/**
  * base64/base64url decoder/encoder functions...
  */
 let d64 = (b64) => new Buffer.from(b64,'base64').toString();  // base64 decode to text
@@ -65,6 +74,13 @@ let u64b = (s) => (s+'==='.slice(0,(4-s.length%4)%4)).replace(/\-/g, '+').replac
 let j64u = (obj) => b64u(e64(JSON.stringify(obj)));  // JSON to Base64URL
 let u64j = (s) => { try { return JSON.parse(d64(u64b(s))) } catch(e) { return {}; } }; // Base64URL to JSON
 helpers.base64 = { d64: d64, e64: e64, b64u: b64u, u64b: u64b, j64u: j64u, u64j: u64j };
+
+/**
+ * @function distinct filters an array to return only distinct values
+ * @params {array} a - input array
+ * @return {[]} - array
+ */
+helpers.distinct = a => a.filter((v,i,a)=>a.indexOf(v)===i);
 
 /**
  * @function hmac calculates a message authentication hash, sha256, base64 by default
@@ -138,12 +154,12 @@ helpers.jxTo = (json,dflt) => { try { return JSON.parse(json); } catch(e) { retu
 helpers.jxFrom = (obj,pretty=true) => JSON.stringify(obj,null,pretty?2:0);
 
 /**
- * @function jxSafeFrom generates JSON from CIRCULAR objects, removing circular references
+ * @function jxFromCircular generates JSON from CIRCULAR objects, removing circular references
  * @param {object} obj - object to convert to JSON
  * @param {boolean} pretty - flag for pretty output, default true
  * @return {string} - returns a JSON string 
  */
-helpers.jxSafeFrom = (obj,pretty=true) => JSON.stringify(obj,(()=>{
+helpers.jxFromCircular = (obj,pretty=true) => JSON.stringify(obj,(()=>{
     const seen = new WeakSet();
     return (k,v)=>(typeof v !=='object' || v===null || v instanceof RegExp) ? v : seen.has(v) ? undefined : (seen.add(v), v);
 })(),pretty?2:0);
@@ -183,6 +199,17 @@ helpers.pad = (str,len,ch=' ',left=false) => left ? (Array(len+1).join(ch)+Strin
   (String(str)+Array(len+1).join(ch)).slice(0,len);
 
 /**
+ * @function printObj returns the simple serialized object or array with verbose JSON look for logging
+ * @param {object} o - object serialized
+ * @return {string} single line serial string
+ */
+helpers.printObj = (o) => {
+    let str = o instanceof Array ? '[' : '{';
+    for (let p in o) { str += (o instanceof Array ? '' : p+': ') + (typeof o[p] == 'string' ? "'" + 
+      o[p].replace("'","\\'") + "'" : (typeof o[p] == 'object' ? helpers.printObj(o[p]) : o[p])) + ", " };
+    return str.slice(0,-2) + (str.startsWith('[') ? ']' : '}'); };
+
+/**
  * @function pluralize returns the correct word form for number given
  * @param {integer} num - item count
  * @param {string} singular - singular noun form
@@ -195,7 +222,8 @@ helpers.pluralize = (num,singular,plural) => num==1 ? singular : (plural || sing
  * @param  {...string} args - list of path parts to join
  * @return {string} path - a correctly formatted path, not guarantted to be valid!
  */
-helpers.resolveSafePath = (...args) => path.resolve(path.join(args[0],...(args.slice(1).map(a=>a.replace(/\.\./g,'')))));
+helpers.resolveSafePath = (...args) => path.resolve(path.join(args[0],
+    ...(args.slice(1).filter(Boolean).map(a=>a.replace(/\.\./g,'')))));
 /**
  * @function resolveURL correctly joins a list of path parts (...args) into a valid URL...
  * @param  {...string} args - list of path parts to join

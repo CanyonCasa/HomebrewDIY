@@ -12,8 +12,10 @@
 ///*************************************************************
 const url = require('url');
 const fs = require('fs');
-const { asBytes, asList, base64, jxSafeFrom, jxFrom, jxTo, resolveSafePath, uniqueID, verifyThat } = require('./helpers');
-const { auth, httpStatusMsg, jwt, statistics, mimeType } = require('./workers');  
+const qs = require('querystring');
+const { asBytes, asList, base64, jxCopy, jxFromCircular, jxFrom, jxTo, resolveSafePath, uniqueID, verifyThat } = 
+  require('./helpers');
+const { auth, httpStatusMsg, jwt, logins, statistics, mimeType } = require('./workers');  
 const pathMatch = require("path-to-regexp").match;
 const { sniff } = require('./streams');
 
@@ -25,43 +27,42 @@ var serverware = {};    // export variable
 
 ///*************************************************************
 /// serverware context building constructs...
-let ResopnseContext = function ResopnseContext(...args) {
+let ResponseContext = function ResponseContext(...args) {
     if (args.length==2) {   // specifies type and buffer, i.e. ('xml',<Buffer 3c 6f 6b 3e 3c 2f 6f 6b 3e>)
         this.contents = args[1];
-        this.headers = { 'Content-type': mimeType(arg[0]), 'Content-length': this.contents.bytelength };
+        this.headers = { 'Content-type': mimeType(args[0]), 'Content-length': this.contents.bytelength };
     } else {
         Object.keys(args[0]).map(k=>this[k]=args[0][k]);  // assign object as ResponseObject
     };
 };
-serverware.ResopnseContext = ResopnseContext;
+serverware.ResponseContext = ResponseContext;
 
-// prototype for creating request context ...
-// only resopnse and state considered mutatable properties; otherwise assume read-only values
-const cProto = {            // private data store in prototype
-    _hdrs: {},           // response header list
-    router: {               // current context routing data
-        route: [],          // current route
-        index: 0,           // current route index
-    }
-};
-const ctxPrototype = {
-    request: null,          // request placeholder
-    headers: function(obj={}) { obj.mapByKey((v,k)=>this._hdrs[k.toLowerCase()]=v); return this._hdrs.filterByKey(v=>v); },
-    state: {},              // custom middleware state data, app specific
-    authenticated: false,   // request authenticated
-    authorize: ()=>false,   // default, overridden in context when user authenticated
-    jwt: '',                // JSON web token
-    user: {                 // validated user info
-        member: '',         // default group membership
-        username: ''        // default username
-    },           
-    next: null              // placeholder for next route call
-};
 /**
  * @function createContext creates the server context instance
  * @return {object} context for request
  */ 
-serverware.createContext = () => Object.create(cProto).mergekeys(ctxPrototype).mergekeys({_headers: {}, router:{index:0}});
+serverware.createContext = () => ({
+    // prototype for creating request context ...
+    // consider only state as mutatable property; otherwise assume read-only values
+    request: null,          // request placeholder
+    state: {},              // custom middleware state data, app specific
+    authenticated: false,   // request authenticated
+    authorize: ()=>false,   // default, overridden in context when user authenticated
+    jwt: '',                // JSON web token
+    user: {                 // validated user info, default, overridden in context when user authenticated
+        member: '',         // default group membership
+        username: ''        // default username
+    },
+    headers: function hdrs(obj={}) {    // headers function sets or get response headers (internally)
+        hdrs._hdrs=hdrs._hdrs||{}; obj.mapByKey((v,k)=>hdrs._hdrs[k.toLowerCase()]=v); 
+        return hdrs._hdrs.filterByKey(v=>v!==undefined);
+    },
+    routing: {              // current context routing data
+        route: [],          // current route
+        index: 0,           // current route index
+    },
+    next: null              // placeholder for next route call
+});
 
 /**
 * @function parseAuthHeader parses the Authorization header into parts used downstream
@@ -71,16 +72,26 @@ serverware.createContext = () => Object.create(cProto).mergekeys(ctxPrototype).m
 let parseAuthHeader = async (header) => {
     if (!header) throw { code: 401, msg: `Malformed Authorization header: ${header}` };
     let hdr = { header: header, tokens: (header+" ").split(/\s+/,2) };
-    [hdr.method, hdr.atoken] = [hdr.tokens[0].toLowerCase(), hdr.tokens[1]];
+    [hdr.method, hdr.token] = [hdr.tokens[0].toLowerCase(), hdr.tokens[1]];
     if (hdr.method=='basic') {
-        hdr.text = base64.d64(hdr.atoken);
+        hdr.text = base64.d64(hdr.token);
         [hdr.username, hdr.pw] = (hdr.text+':').split(':',2);
     } else if (hdr.method=='bearer') {
-        hdr.fields = jwt.extract(hdr.atoken);    // just parse header!
+        hdr.fields = jwt.extract(hdr.token);    // just parse header!
+        hdr.username = (hdr.fields.payload||{}).username||'';
     } else {
         throw { code: 401, msg: `Authentication Method Not Supported!: ${header}` };
     };
     return hdr;
+};
+
+let urlParse = (url) => {
+    let tmp = new URL(url);
+    let query = {};
+    let params = tmp.searchParams;
+    for (let k of params.keys()) { query[k]= params.getAll(k).length<2 ? params.get(k) : params.getAll(k); };
+    return { href: tmp.href, origin: tmp.origin, protocol: tmp.protocol, host: tmp.host, hostname: tmp.hostname,
+        port: tmp.port || tmp.protocol=='https' ? 443 : 80, pathname: tmp.pathname, search: tmp.search, query: query };
 };
 
 /**
@@ -92,31 +103,34 @@ let parseAuthHeader = async (header) => {
 let parseRequestProperties = (req) => {
     let [contentType, boundary] = (req.headers['content-type'] || 'text/*').split('; ');
     let debug = req.url.endsWith('!');
+    let protocol = req.headers['x-forwarded-proto'] || 'http';
+    let host = req.headers.host || req.headers['x-forwarded-host'] || '';
+    let url = debug ? req.url.slice(0,-1) : req.url;
     let rx = {
         HEADERS: req.headers,
-        protocol: req.headers['x-forwarded-proto'] || 'http',
         remote: {
             ip: req.headers['x-forwarded-for'] || req.connection.remoteAddress || "",
             port: req.socket.remotePort || null
         },
-        host: req.headers.host || req.headers['x-forwarded-host'] || '',
         method: req.method.toLowerCase(),
-        originalURL: debug ? req.url.slice(0,-1) : req.url,
         contentType: contentType,
         boundary: boundary ? boundary.split('=')[1] : null,
         dataType: contentType=='application/json' ? 'json' : contentType=='application/x-www-form-urlencoded' ? 'urlenc' :
           contentType.startsWith('text/') ? 'text' : contentType=='multipart/form-data' ? 'formdata' : 
           contentType=='application/octet-stream' ? 'octet' : '',
-        origin: req.headers['origin'] || ''
+        original: { host: host, href: `${protocol}://${host}${url}`, protocol: protocol, url: url }
     };
+    rx.mergekeys(urlParse(rx.original.href));
     let verbChk = (v,m) => v==m || (v=='get'&&m=='head') || v=='any';
-    rx.hostname = rx.host.split(':')[0];
-    rx.port = rx.host.split(':')[1] || (rx.protocol=='https' ? 443 : 80),
-    rx.fqURL = `${rx.protocol}://${rx.host}${rx.originalURL}`;
-    rx.url = url.parse(rx.fqURL, true);   // Parse the fully qualified request url
-    rx.baseURL = rx.url.pathname;
-    rx.query = ({}).mergekeys(rx.url.query);
     return { debug: debug, request: rx, verbIs: vs=>asList(vs).some(v=>verbChk(v.toLowerCase(),rx.method)) };
+};
+
+// URL rewrite process...
+// rules = array of rule -> {pattern: <regex>|<string>, replace: <string>}
+let urlRewrite = (rules,url) => {
+    let tmp = url;
+    rules.forEach(r=>{tmp = tmp.replace(r.pattern,r.replace)});
+    return { changed: tmp!==url, url: tmp };
 };
 
  /**
@@ -140,18 +154,20 @@ let authorize = (allowed,memberOf) => { // user assumed authenticated if this ge
 async function authenticate(ctx) {
     let header = await parseAuthHeader(ctx.request.HEADERS.authorization);  // always needed for authentication
     if (header.method==='bearer') { // JWT authentication requested
-        if (!jwt.verify(header.fields)) throw { code: 401, msg: 'Expired or Invalid JWT credentials' };
+        if (!jwt.verify(header.token)) logins.log(header.username,'failed JWT', { code: 401, msg: 'Expired or Invalid JWT credentials' });
         ctx.user = header.fields.payload;  // valid JWT so authentication valid
+        logins.log(ctx.user.username,'bearer');
     } else if (header.method==='basic') { // Basic authentication requested (i.e. login)
-        if (!header.username && !header.pw) throw { code: 401, msg: 'Invalid authentication credentials' };
+        if (!header.username && !header.pw) logins.log(header.username,'invalid', { code: 401, msg: 'Invalid authentication credentials' });
         let user = this.getUser(header.username);
-        if (verifyThat(user,'isEmpty')) throw { code: 401, msg: 'Invalid user credentials' };
-        if (user.status!=='ACTIVE') throw { code: 401, msg: 'Inactive user' };
+        if (verifyThat(user,'isEmpty')) logins.log(header.username,'invalid', { code: 401, msg: 'Invalid user credentials' });
+        if (user.status!=='ACTIVE') logins.log(user.username,'failed inactive', { code: 401, msg: 'Inactive user' });
         let valid = (await auth.checkPW(header.pw,user.credentials.hash)) ||    // may be a password (hash) login
             auth.checkCode(header.pw,user.credentials.passcode);                // or a passcode login
-        if (!valid) throw { code: 401, msg: 'Authentication failed!' };
+        if (!valid) logins.log(user.username,'failed login', { code: 401, msg: 'Authentication failed!' });
         delete user.credentials; // remove sensitive user information
         ctx.user = user;
+        logins.log(ctx.user.username,'basic');
     };
     // only get here if user has been validated; other methods will be rejected in parseAuthHeader
     ctx.authenticated = header.method;  
@@ -171,7 +187,7 @@ function bodyParseFormData(req,ctx,options) {
         let parts = { files:[] };
         let buffer = Buffer.from('','binary');
 
-        const overflow = ()=>jxSafeFrom(parts).length>max; // pseudo/approximate length of recovered data
+        const overflow = ()=>jxFromCircular(parts).length>max; // pseudo/approximate length of recovered data
 
         function terminate(e) {
             buffer = null;
@@ -341,7 +357,7 @@ function bodyParseUrlEnc(req,ctx,options) {
     return new Promise((resolve,reject)=>{
         try {
         req.on('data',chunk=>{ if ((ctx.request.raw.length+chunk.length<limit)) ctx.request.raw += chunk; });
-        req.on('end',()=>{ ctx.request.body=querystring.parse(ctx.request.raw); resolve(ctx); });
+        req.on('end',()=>{ ctx.request.body=qs.parse(ctx.request.raw); resolve(ctx); });
         req.on('error',(e)=>reject({ code: 500, msg:`Body parsing error: ${e.toString()}` }));
         } catch(e) { reject(e); }; 
     });
@@ -381,7 +397,7 @@ async function bodyParse(req,ctx,options) {
 serverware.addRoute = (table,method,route,asyncFunc) => {
     if (!(asyncFunc instanceof Function)) throw "ERROR: middleware requires function declaration";
     let routeFunc = route ? pathMatch(route, { decode: decodeURIComponent }) : null;    // define route parse/test function
-    table.push({ method:method, route: route, test:routeFunc, afunc:asyncFunc });          // add to the route table
+    table.push({ method:method, route: route, test:routeFunc, afunc:asyncFunc, op: asyncFunc.name});       // add to the route table
     return table;
 };
 
@@ -395,36 +411,45 @@ serverware.router = async function(ctx) {
     if (!ctx.next) ctx.next = async function(err) { if (err) throw err; return await serverware.router.call(self,ctx); };
     let check = false;
     while (!check) {    // find next middleware that matches route and method
-        ctx.router.route = self.routes[ctx.router.index++];  // get next route or undefined
-        if (!ctx.router.route) throw 404;   // not found if last route already processed
-        //check = (ctx.router.route.method=='any' || ctx.router.route.method==ctx.request.method) && 
-        check = ctx.verbIs(ctx.router.route.method) && (!ctx.router.route.test || ctx.router.route.test(ctx.request.baseURL));
+        ctx.routing.route = self.routes[ctx.routing.index++];  // get next route or undefined
+        if (!ctx.routing.route) throw 404;   // not found if last route already processed
+        //check = (ctx.routing.route.method=='any' || ctx.routing.route.method==ctx.request.method) && 
+        check = ctx.verbIs(ctx.routing.route.method) && (!ctx.routing.route.test || ctx.routing.route.test(ctx.request.pathname));
         ctx.request.params = ({}).mergekeys(typeof check == 'object' && check.params);
         ctx.args = ({}).mergekeys(ctx.request.params).mergekeys(ctx.request.query);
     };
-    return await ctx.router.route.afunc.call(self,ctx);   // call middleware and wait for response or error
+    return await ctx.routing.route.afunc.call(self,ctx);   // call middleware and wait for response or error
 };
 
 
 ///*************************************************************
 /// Request, response and error handling...
 
-serverware.defineRequestPreprocessor = function(options={}) {
-    let scribble = this.scribe;
+serverware.defineRequestPreprocessor = function(cfg={}) {
     let self = this;
+    let scribble = this.scribe;
     let authenticating = this.authenticating;
-    let opts = { temp: '../tmp', limits: {request: '64K', upload: '10M'} }.mergekeys(options);
+    let opts = { temp: '../tmp', limits: {request: '64K', upload: '10M'}, 
+      log: "RQST[${ctx.request.method}]: ${ctx.request.href}" }.mergekeys(cfg.options);
+    let prompt = (msg,vars) => new Function("let ctx=this; return `"+msg+"`;").call(vars);  // ctx->vars->this->ctx
     let bodyParseOptions = {temp: resolveSafePath(opts.temp), 
         limits: { request: asBytes(opts.limits.request), upload: asBytes(opts.limits.upload) }};
     if (!fs.existsSync(bodyParseOptions.temp)) fs.mkdirSync(bodyParseOptions.temp);
     
     return async function requestProcessor(req,ctx) {
         let props = parseRequestProperties(req);                                // parse request properties
-        scribble.log(`RQST[${props.request.method}]: ${props.request.fqURL}`);  // log request
-        statistics.inc(scribble.tag,'requests');
         ctx.mergekeys(props);
         if (authenticating && 'authorization' in ctx.request.HEADERS) await authenticate.call(self,ctx);
-        return await bodyParse(req,ctx,bodyParseOptions);
+        await bodyParse(req,ctx,bodyParseOptions);
+        scribble.log(prompt(opts.log,ctx));                 // log request
+        if (opts.rewrite) {
+            let rewrite = urlRewrite(opts.rewrite,ctx.request.href);
+            if (rewrite.changed) {
+                ctx.request.mergekeys(urlParse(rewrite.url));
+                scribble.log(`REWRITE -> ${rewrite.url}`);  // log request
+            };
+        };
+        statistics.inc(scribble.tag,'requests');
     };
 };
 
@@ -433,12 +458,12 @@ serverware.defineRequestPreprocessor = function(options={}) {
  * @function defineResponseHandler returns the handler to returning requested data
  * @param {object} ctx - request/response context 
  */
-serverware.defineResponseProcesser = function(options={}) {
+serverware.defineResponseProcesser = function(cfg={}) {
     let scribble = this.scribe;
 
     return async function processResponse(ctx,res) {
         let headOnly = ctx.verbIs('head');
-        if (ctx.data instanceof ResopnseContext) {      // streaming or buffered content
+        if (ctx.data instanceof ResponseContext) {      // streaming or buffered content
             ctx.headers(ctx.data.headers);     // any included headers
             if (headOnly) ctx.headers({'Content-length': 0})
             ctx.headers().mapByKey((v,h)=>res.setHeader(h,v));   // set response headers
@@ -446,26 +471,30 @@ serverware.defineResponseProcesser = function(options={}) {
                 res.end();
             } else if (ctx.data.streaming) {
                 let bytesSent = 0;
-                let sniffer = sniff(buf=>bytesSent+=buf.length);
+                let sniffer = sniff(buf=>{bytesSent+=buf.length});
                 ctx.data.contents.pipe(sniffer).pipe(res);
                 ctx.data.contents.on('close',()=>{
                     let { compressed, size } = ctx.data;
                     let ratio = bytesSent ? (size/bytesSent).toFixed(2)+'X' : '1X';
                     let summary = `${size}/${bytesSent}/${ratio} bytes`;
-                    scribble.trace(`Streaming ${compressed?'compressed ':''}response sent for ${ctx.request.fqURL} (${summary})`);
+                    scribble.trace(`Streaming ${compressed?'compressed ':''}response sent for ${ctx.request.href} (${summary})`);
                     res.end();
                 });
             } else {    // buffered response
                 res.end(ctx.data.contents);
-                scribble.trace(`Buffered response sent for ${ctx.request.fqURL} (${ctx.data.contents.byteLength} bytes)`);
+                scribble.trace(`Buffered response sent for ${ctx.request.href} (${ctx.data.contents.byteLength} bytes)`);
             };
         } else {        // treat all other responses as JSON
-            let tmp = !headOnly ? (jxSafeFrom(ctx.debug ? ({}).mergekeys(ctx) : ctx.data, false)) : '';
+            let tmp = !headOnly ? (jxFromCircular(ctx.debug ? ({}).mergekeys(ctx) : ctx.data, false)) : '';
             ctx.headers({'Content-Type': 'application/json', 'Content-Length': tmp.length}).mapByKey((v,h)=>res.setHeader(h,v));
+            while (tmp.length>16384) {
+                res.write(tmp.slice(0,16384));
+                tmp = tmp.slice(16384);
+            };
             res.end(tmp);
-            if (!headOnly) scribble.trace(`JSON response sent for ${ctx.request.fqURL} (${tmp.length} bytes)`);
+            if (!headOnly) scribble.trace(`JSON response sent for ${ctx.request.href} (${tmp.length} bytes)`);
         };
-        if (headOnly) scribble.trace(`HEAD response sent for ${ctx.request.fqURL}`);
+        if (headOnly) scribble.trace(`HEAD response sent for ${ctx.request.href}`);
     };
 };
 
@@ -473,20 +502,20 @@ serverware.defineResponseProcesser = function(options={}) {
  * @function defineErrorHandler returns the handler for http response errors
  * @param {object} ctx - request/response context 
  */
-serverware.defineErrorHandler = function(options={}) {
+serverware.defineErrorHandler = function(cfg={}) {
     let scribble = this.scribe;
-    let redirect = options && options.redirect || null;
+    let redirect = cfg.redirect || null;
 
     return async function errorHandler(err,ctx,res) {
         try {
             let ex = httpStatusMsg(err);            // standard HomebrewDIY error format
             if (ex.code==404 && redirect) {         // if not found provide the option of redirecting
-                let destination = ctx.request.fqURL.replace(...redirect);
-                scribble.trace(`Redirect[${ctx.request.method}] ${ctx.request.fqURL} -> ${destination}`);
-                res.writeHead(302,destination);
+                let destination = ctx.request.href.replace(...redirect);
+                scribble.trace(`Redirect[${ctx.request.method}] ${ctx.request.href} -> ${destination}`);
+                res.writeHead(301,{Location: destination});
             } else if (ex.code < 400) {             // status response only, not an error!
                 res.writeHead(ex.code,ex.msg);
-                scribble.trace(`Status[${ctx.request.method}] ${ctx.request.fqURL} -> ${ex.code}:${ex.msg}`);
+                scribble.trace(`Status[${ctx.request.method}] ${ctx.request.href} -> ${ex.code}:${ex.msg}`);
             } else {                                // response with error message, if possible
                 let eText = JSON.stringify(ex);
                 if (!res.headersSent) {

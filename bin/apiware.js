@@ -3,7 +3,7 @@
  * This modules provides an endpoint handler for the homebrew API.
  * (c) 2020 Enchanted Engineering, MIT license
  * The app.js file conditionally loads this file and treats all exported functions as middleware
- * It can be ueed as is or as a skeleton for user customizable API. 
+ * It can be used as is or as a skeleton for user customizable API. 
  * @example
  *   const cw = require('./apiware');
  */
@@ -12,16 +12,15 @@
 ///*************************************************************
 /// Dependencies...
 ///*************************************************************
-const { asList, jxCopy, jxSafe, verifyThat } = require('./helpers');
-const { analytics, auth: {genCode}, mail, sms, statistics } = require('./workers');  
-const { ResopnseContext } = require('./serverware');
+const { asList, asTimeStr, jxCopy, jxSafe, verifyThat } = require('./helpers');
+const { analytics, auth: {genCode}, blacklists, logins, mail, sms, statistics } = require('./workers');  
+const { ResponseContext } = require('./serverware');
 const jxDB = require('./jxDB');
 
 
 ///*************************************************************
 /// declarations...
 var apiware = {};               // serverware middleware container    
-let args, db, scribble, site;   // module globals
 
 
 ///*************************************************************
@@ -40,12 +39,14 @@ let args, db, scribble, site;   // module globals
  * @param {object} ctx request context
  * @return {object} summary message
  */
- async function grant(ctx) {
+async function grant(ctx) {
+    let site = this;
+    let scribble = this.scribe;
     if (!('users' in site.db)) throw 501;
     if (!ctx.authorize('grant')) throw 401;
-    let user = asList(args.user || args.opts[0] || '');
-    let exp = ((e)=>e>10080 ? 10080 : e)(args.exp || args.opts[1] || 30); // limited expiration in min; self-executing function
-    let byMail = args.mail || args.opts[1];
+    let user = asList(ctx.args.user || ctx.args.opts[0] || '');
+    let exp = ((e)=>e>10080 ? 10080 : e)(ctx.args.exp || ctx.args.opts[1] || 30); // limited expiration in min; IIFE
+    let byMail = ctx.args.mail || ctx.args.opts[1];
     let ft = (t,u)=>{return u=='d' ? (t>7?7:t)+' days' : u=='h' ? (t>24?ft(t/24,'d'):t+' hrs') : t>60? ft(t/60,'h') : t+' mins'};
     let expStr = ft(exp);
     let contacts = site.db.users.query('contacts',{ref:'.*'});
@@ -55,8 +56,8 @@ let args, db, scribble, site;   // module globals
             let passcode = genCode(7,36,exp);
             site.chgUser(u,{credentials:{ passcode: passcode}});
             let msg =`${ctx.user.username} granted access to...\n  user: ${u}\n  passcode: ${passcode.code}\n  valid: ${expStr}`;
-            return byMail ? sendMail({to: contacts[u].email, time:true,text:msg}) : 
-              sendText({to: contacts[u].phone, time:true,text:msg});
+            return byMail ? sendMail.call(site,{to: contacts[u].email, time:true,text:msg}) : 
+              sendText.call(site,{to: contacts[u].phone, time:true,text:msg});
         }))
         .then(x=>{
             let ok=[], fail=[];
@@ -81,14 +82,14 @@ let args, db, scribble, site;   // module globals
 function info(ctx) {
     let ok = ctx.authorize('server');
     let { ip:raw, port } = ctx.request.remote;
-    if (raw==='::1') raw = '::127.0.0.1';
-    let v4 = raw.replace(/:(.*):([\d.]+)/,($0,$1,$2)=>$1?$2:'127.0.0.'+$2);
+    let v4 = raw.replace(/:.*:([\d.]+)/,($0,$1)=>$1.includes('.')?$1:'127.0.0.'+$1);
     let v6 = (v4!=raw) ? raw : "0:0:0:0:0:0:0:0";
     let dx = new Date().style();
-    let iot = { ip: v4, time: dx.e, iso: dx.iso };
-    let internals = ok ? { stats: statistics.get(), analytics: analytics.get() } : {};
-    let full = internals.mergekeys({ ip: {raw: raw, v4: v4, v6: v6, port: port}, date: dx });
-    return (ctx.request.params.recipe!=='iot') ? full : iot;
+    if (ctx.request.params.recipe==='iot') return { ip: v4, time: dx.e, iso: dx.iso };
+    let internals = { statistics: statistics.get() };
+    internals.statistics.$diy.uptime = asTimeStr(new Date(dx.iso) - new Date(internals.statistics.$diy.start));
+    if (ok) internals.mergekeys({ analytics: analytics.get(), app: this, blacklists: blacklists.get(), logins: logins.get() });
+    return { ip: {raw: raw, v4: v4, v6: v6, port: port}, date: dx }.mergekeys(internals);
 };
 
 /**
@@ -97,8 +98,8 @@ function info(ctx) {
  * @return {object} current mask level
  */
 function mask(ctx) {
-    let mask = scribble.maskLevel(ctx.authorize('server') ? args.level||args.opts[0] : '');
-    return {msg: `Scribe mask: ${mask}, mask: ${mask}`};
+    let mask = this.scribe.maskLevel(ctx.authorize('server') ? ctx.args.level||ctx.args.opts[0] : '');
+    return { msg: `Scribe mask: ${mask}`, mask: mask };
 };
 
 /**
@@ -107,15 +108,18 @@ function mask(ctx) {
  * @return {object} a report summary 
  */
 async function sendMail(msg) {
+    let site = this;
+    let scribble = this.scribe;
     if (!('users' in site.db)) throw 501;
     let addressBook = site.db.users.query('contacts',{ref:'.+'}).mapByKey(v=>v.email);
-    let letter = {id: msg.id, time: msg.time, subject: msg.subject, hdr: msg.hdr, text: msg.text, body: msg.body, html: msg.html};
+    let letter = {id: msg.id, time: msg.time, subject: msg.subject, hdr: msg.header||msg.hdr, text: msg.text, body: msg.body, html: msg.html};
     ['to','cc','bcc'].forEach(addr=>{  // resolve email addressing
        let tmp = msg[addr] instanceof Array ? msg[addr] : typeof msg[addr]=='string' ? msg[addr].split(',') : [];
        tmp = tmp.map(a=>a.includes('@')?a:addressBook[a]).filter(a=>a).filter((v,i,a)=>v && a.indexOf(v)===i).join(',');
        if (tmp) letter[addr] = tmp;
     });
     if (msg.from) letter.from = msg.from.includes('@')?msg.from:addressBook[msg.from];
+    scribble.trace(letter);
     return await mail(letter);
 };
 
@@ -125,14 +129,17 @@ async function sendMail(msg) {
  * @return {object} a report summary and queue details 
  */
 async function sendText(msg) {
+    let site = this;
+    let scribble = this.scribe;
     if (!('users' in site.db)) throw 501;
     let phoneBook = site.db.users.query('contacts',{ref:'.+'}).mapByKey(v=>v.phone);
     let text = { callback: msg.callback, id: msg.id || '' };    // format optional header with id and/or time
     text.timestamp = msg.time ? '['+new Date().toISOString()+']' : '';
-    text.body = (msg.hdr || ((text.id||text.timestamp) ? text.id+text.timestamp+':\n' : '')) + msg.text;
+    text.body = (msg.header || msg.hdr || ((text.id||text.timestamp) ? text.id+text.timestamp+':\n' : '')) + msg.text;
     // map recipients, group or to "users and/or numbers" to prefixed numbers...
     let list = [msg.recipients,msg.group,msg.to].map(g=>(g||'').toString()).filter(n=>n).join(',').split(',');
     text.numbers = list.map(n=>isNaN(n)?phoneBook[n]:n).filter(n=>n);
+    scribble.trace('sendText:',list, msg, text);
     return await sms(text);
 };
 
@@ -141,29 +148,32 @@ async function sendText(msg) {
  * @param {object} rpt Twilio message report data (JSON)
  * @return {string} XML response data
  */
-function twilio(rpt) {
-    if (args.opts[0]!=='status') return "<Response><Message>No one receives replies to this number!</Message></Response>";
+function twilio(ctx) {
+    let scribble = this.scribe;
+    if ((ctx.args.opts||[])[0]!=='status') 
+        return "<Response><Message>No one receives replies to this number!</Message></Response>";
+    let rpt = ctx.request.body || {};
     if (rpt.MessageStatus=='undelivered') {
         let notice = `Message to ${rpt.To} failed, ref: ${rpt.MessageSid}`;
         scribble.warn(`Action[twilio]: ${notice}`);
-        sms({contact: args.opts[1], text: notice})
-          .then(data=>{ scribble.log(`Twilio callback made to ${args.opts[1]} for ${rpt.MessageSid}`); })
+        sms({contact: ctx.args.opts[1], text: notice})
+          .then(data=>{ scribble.log(`Twilio callback made to ${ctx.args.opts[1]} for ${rpt.MessageSid}`); })
           .catch(err=>{ scribble.error("Action[twilio] ERROR: %s", err); }); 
     };
-    return "<Response></Response>";
+    return "<Response></Response>"; // empty XML response == 'OK'
 };
 
-async function inquire(ctx) {
-    let recipe = db.lookup(args.recipe||'');    // get recipe
-    if (verifyThat(recipe,'isEmpty')) return null;
+async function inquire(db,ctx) {
+    let recipe = db.lookup(ctx.args.recipe||'');    // get recipe
+    if (verifyThat(recipe,'isEmpty')) throw 404;
     if (recipe.auth && !ctx.authorize(recipe.auth)) throw 401;  // check auth
     let bindings = verifyThat(ctx.request.query,'isNotEmpty') ? ctx.request.query : ctx.request.params.opts||[];
     return db.query(recipe,jxSafe(bindings,recipe.filter||'*'));   // query db
 };
 
-async function cache(ctx) {
-    let recipe = db.lookup(args.recipe||'');    // get recipe
-    if (verifyThat(recipe,'isEmpty')) return null;
+async function cache(db,ctx) {
+    let recipe = db.lookup(ctx.args.recipe||'');    // get recipe
+    if (verifyThat(recipe,'isEmpty')) throw 404;
     if (recipe.auth && !ctx.authorize(recipe.auth)) throw 401;  // check auth
     let data = ctx.request.body;
     if (!verifyThat(data,'isArrayOfAnyObjects')) return [];
@@ -177,32 +187,32 @@ async function cache(ctx) {
  * @return {object} middleware
  */
 apiware.api = function api(options={}) {
-    site = this;
-    scribble = this.scribe;
-    db = options.db ? (typeof options.db=='string' ? site.db[options.db] : new jxDB(options.db)) : site.db.site;
+    let site = this;
+    let scribble = this.scribe;
+    let db = options.database ? (typeof options.database=='string' ? site.db[options.database] : new jxDB(options.database)) : site.db.site;
     if (!db) scribble.fatal('Required database NOT defined for Homebrew API middleware!');
     scribble.trace(`Homebrew API middleware configured to use ${db.file} database.`);
     scribble.info(`Homebrew API middleware initialized with route '${options.route}'...`);
     return async function apiCW(ctx) {
-        args = {opts:[]}.mergekeys(ctx.request.params).mergekeys(ctx.request.query);
-        scribble.trace("args:",args,ctx.request.params,ctx.request.query);
+        scribble.trace(`route[${ctx.routing.route.method}]: ${ctx.routing.route.route}`);
         switch (ctx.request.params.prefix) {
-            case '$': return await (ctx.verbIs('get') ? inquire(ctx) : ctx.verbIs('post') ? cache(ctx) : null);
+            case '$': return await (ctx.verbIs('get') ? inquire(db,ctx) : ctx.verbIs('post') ? cache(db,ctx) : null);
             case '@':   // built-in actions
+                if (ctx.request.method!=='post') throw 405;
                 switch (ctx.request.params.recipe) {
-                    case "grant": return await grant(ctx);
-                    case "scribe": return mask(ctx);
+                    case "grant": return await grant.call(site,ctx);
+                    case "scribe": return mask.call(site,ctx);
                     case "mail": 
                         if (!ctx.authorize('contact')) throw 401;
-                        return await sendMail(ctx.request.body||{});
+                        return await sendMail.call(site,ctx.request.body||{});
                     case "text": 
                         if (!ctx.authorize('contact')) throw 401;
-                        return await sendText(ctx.request.body||{});
-                    case "twilio": return new ResopnseContext('xml',Buffer.from(twilio(ctx.request.body||{})));
+                        return await sendText.call(site,ctx.request.body||{});
+                    case "twilio": return new ResponseContext('xml',Buffer.from(twilio.call(site,ctx)));
                 };
             case '!':
-                if (ctx.request.method!=='get') throw 400;
-                return info(ctx);
+                if (ctx.request.method!=='get') throw 405;
+                return info.call(site,ctx);
             default: 
                 return await ctx.next();
         };

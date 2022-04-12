@@ -76,7 +76,7 @@ workers.cleanupProcess = (options={}) => { cleanup.mergekeys(options); return cl
 
 /**
  * @class auth provides routines to generate and check authentication codes and passwords
- * @function codeCheck validates a challenge code and returns a true/false result
+ * @function checkCode validates a challenge code and returns a true/false result
  * @param {string} challengeCode - code to be tested
  * @param {object} credentials - object with validation parameters: code, iat, expiration
  * @returns {boolean} - validation check state: true = valid code
@@ -174,26 +174,27 @@ workers.jwt = {
     create: (data,secret,expiration) => {
         // payload always includes 'initiated at' (iat) and expiration in minutes (exp), plus data
         let exp = expiration*60 || data.exp || cfgJWT.expiration*60;   // expiration in seconds
-        let payload = Object.assign({ iat: new Date().valueOf()/1000|0, exp: exp},data);
+        let payload = Object.assign({},data,{ iat: new Date().valueOf()/1000|0, exp: exp, ext: cfgJWT.renewal});
         let encHeader = x64.j64u({alg: 'HS256',typ: 'JWT'});  // only support for HS256
         let encPayload = x64.j64u(payload);
         let signature = x64.b64u(hmac(encHeader+'.'+encPayload,secret||cfgJWT.secret));
         return [encHeader,encPayload,signature].join('.');
     },
-    expired: (data,expiration) => {  // accepts jwt string or jwt object or payload object (fields),  true if expired
-        let payload = typeof data == 'string' ? workers.jwt.extract(data).payload : 'payload' in data ? data.payload : data;
-        let exp = expiration*60 || payload.exp || cfgJWT.expiration*60;   // expiration in seconds
-        let expDate = new Date(1000*(payload.iat + exp));
-        return expDate < new Date();    // exp < now
+    expired: (payload) => {  // accepts decoded payload object; returns true if expired
+        let { exp, iat } = payload;   // initiated at and expiration times in seconds
+        let expDate = new Date(1000*(iat + exp));
+        return expDate < new Date();    // exp < now == false if not expired
     },
     extract: (jwt) => {
         let fields = (jwt+"..").split('.',3);
         return { header: x64.u64j(fields[0]), payload: x64.u64j(fields[1]), signature: fields[2] };
     },
-    verify: (data,secret) => {  // accepts jwt string or jwt object (fields);  true if valid
-        let { payload, signature } = typeof data == 'string' ? workers.jwt.extract(data) : data;
-        let check = workers.jwt.extract(workers.jwt.create(payload,secret||cfgJWT.secret));
-        return (signature===check.signature) && !workers.jwt.expired(payload) ? payload : null;
+    verify: (jwt,secret) => { // accepts jwt token string; returns true if valid
+        let [ header, payload, signature ] = (jwt+"..").split('.',3);   // encoded fields
+        let chkSignature = x64.b64u(hmac(header+'.'+payload,secret||cfgJWT.secret));
+        let payloadData = x64.u64j(payload);
+        let expired = workers.jwt.expired(payloadData);
+        return (signature===chkSignature) && !expired ? payloadData : null;
     }
 };
 
@@ -313,14 +314,17 @@ workers.mail = !cfg.sendgrid ? async ()=>{ throw 503; } : async function mail(ms
 /// mime-types lookup ...
 let mimes = { // define most common mimeTypes, extend/override with configuration
     'bin': 'application/octet-stream',
+    'css': 'text/css', 
     'csv': 'text/csv', 
     'gz': 'application/gzip',
     'gif': 'image/gif',
     'htm': 'text/html',
     'html': 'text/html',
     'ico': 'image/vnd.microsoft.icon',
-    'jpg': 'image/jpeg', 
+    'jpg': 'image/jpeg',
+    'js': 'text/javascript',
     'json': 'application/json', 
+    'md': 'text/markdown',
     'mpg': 'video/mpeg',
     'png': 'image/png', 
     'pdf': 'application/pdf', 
@@ -475,7 +479,7 @@ const smsSend = function(msg) {
 workers.sms = !cfg.twilio ? async ()=>{ throw 503; } : async function sms(msg) {
     // convert numbers to list, prefix, filter invalid and duplicates
     let contacts = (cfg.twilio.callbackContacts||{})[msg.contact];
-    let numbers = asList(msg.numbers||contacts||cfg.twilio.admin).map(p=>smsPrefix(p)).filter((v,i,a)=>v && (a.indexOf(v)==i));
+    let numbers = asList(msg.numbers||msg.to||contacts||cfg.twilio.admin).map(p=>smsPrefix(p)).filter((v,i,a)=>v && (a.indexOf(v)==i));
     const cb = msg.callback || cfg.twilio.callback || null; // optional server acknowledgement
     let queue = await Promise.all(numbers.map(n=>
         smsSend({To: n, From: cfg.twilio.number, Body: msg.body||msg.text, statusCallback:cb})
@@ -486,75 +490,99 @@ workers.sms = !cfg.twilio ? async ()=>{ throw 503; } : async function sms(msg) {
         summaries: summaries }, queue: queue };
 };
 
-///*************************************************************
-/// Internal statistics and analytics management...
-let internals = {
-    analytics: {},
-    stats: {}
-};
-/**
- * @class InternalsHandler maintains internal server state data
- */
-let InternalsHandler = {
+class Internal {
+
+    constructor() {
+        this.data = {};
+    }
+
     /**
-     * @function set assigns a give value to a tag and key
-     * @param {string} tag - first level identifier
-     * @param {string} key - second level identifier; may be undefined to assign a whole branch
-     * @param {*} value - data assigned to statistic
-     * @return {*} - statistic value
-     */
-    set: (tag,key,value) => {
-        this[tag] = (tag in this) ? this[tag] : {};  // verify existance of tag object or create
-        if (key===undefined) { this[tag] = value; return this[tag]; };  // value may be an object (i.e. branch)
-        this[tag][key] = value;
-        return this[tag][key];
-    },
-    /**
-     * @function get retrieves statistics data by tag and key
+     * @function get retrieves internal data by tag and key
      * @param {string} [tag] - first level identifier; may be undefined to retrieve all data under
      * @param {string} [key] - second level identifier; may be undefined to retrieve a whole branch
      * @return {*} - data as stored, which may be undefined as specified
      */
-    get: (tag,key) => {
-        if (tag===undefined) return this;
-        if (tag in this) {
-            if (key===undefined) return this[tag];
-            if (key in this[tag]) return this[tag][key];
+    get(tag, key) {
+        if (tag===undefined) return this.data;
+        if (tag in this.data) {
+            if (key===undefined) return this.data[tag];
+            if (key in this.data[tag]) return this.data[tag][key];
         };
         return undefined;
-    },
+    }
+
+    /**
+     * @function set assigns a give value to a tag and key
+     * @param {string} tag - first level identifier
+     * @param {string} key - second level identifier; may be undefined to assign a whole branch
+     * @param {*} value - data assigned to internal
+     * @return {*} - internal value
+     */
+    set(tag, key, value) {
+        this.data[tag] = (tag in this.data) ? this.data[tag] : {};     // verify existance of tag object or create
+        if (key===undefined || key===null) {            // value may be an object (i.e. branch) to store directly
+            this.data[tag] = value;
+            return this.data[tag]; 
+        };
+        this.data[tag][key] = value;
+        return this.data[tag][key];
+    }
+  
     /**
      * @function inc increments a statistic, or defines it if it does not exist
      * @param {string} tag - first level identifier; required
      * @param {string} key - second level identifier; required
      * @return {*} - updated data value
      */
-    inc: (tag,key) => {
-        let value = InternalsHandler.get(tag,key);
-        InternalsHandler.set(tag,key, value ? value+1 : 1);
-        return InternalsHandler.get(tag,key);
-    },
+    inc(tag, key) {
+        let value = this.get(tag,key);
+        this.set(tag, key, value ? value+1 : 1);
+        return this.get(tag,key);
+        }
+
     /**
      * @function refs retrieves a list of tags or keys
      * @param {string} [tag] - undefined retrieves all data tags; or all keys for a defined tag 
      * @return {[]} - list of tags or keys
      */
-    refs: (tag) => (tag) ? Object.keys(this[tag]) : Object.keys(this),
+    refs(tag) { return tag ? Object.keys(this.data[tag]) : Object.keys(this.data) }
+
     /**
      * @function clear a statistic specified by tag and key or a branch specified by tag
      * @param {string} [tag] - first level identifier; may be undefined to clear all object data
      * @param {string} [key] - second level identifier; may be undefined to clear a whole branch
      * @return {*} - undefined
      */
-    clear: (tag,key) => tag ? (key ? delete this[tag][key] : delete this[tag]) : Object.keys(this).forEach(k=>delete this(k))
+    clear(tag, key) { tag ? (key ? delete this.data[tag][key] : delete this.data[tag]) : Object.keys(this.data).forEach(k=>delete this.data(k)) }
+}
+
+workers.analytics = new Internal();
+workers.blacklists = new Internal();
+workers.logins = new Internal();
+workers.statistics = new Internal();
+
+workers.logins.log = function log(usr, tag, err) {
+    usr = usr || 'unknown';
+    workers.logins.set(usr,tag,new Date().toISOString());
+    if (tag.startsWith('fail')) {
+        let mark = workers.logins.get(usr, 'mark');
+        if (mark==undefined) {
+            workers.logins.set(usr, 'mark', new Date().toISOString());
+            mark = workers.logins.get(usr, 'mark');
+        };
+        if (+new Date() < (+new Date(mark) + 10*60*1000)) {
+            if (workers.logins.inc(usr, 'count') > 3) {
+                workers.logins.set(usr, 'mark', new Date().toISOString());
+                throw {code: 401, msg: 'Too many login attempts; Account locked for 10 minutes!'};
+            };
+        } else {
+            workers.logins.set(usr, 'mark', new Date().toISOString());
+            workers.logins.set(usr, 'count', 1);
+        };
+        throw err;
+    } else {
+        workers.logins.clear(usr,'count');
+        workers.logins.clear(usr,'mark');
+    };
 };
-
-/**
- * @function statistics records and returns internal server statistics
- * @function analytics records and returns internal analytics data
- */
-workers.statistics = InternalsHandler.mapByKey(v=>v.bind(internals.stats));
-workers.analytics = InternalsHandler.mapByKey(v=>v.bind(internals.analytics));
-
-
 module.exports = workers;

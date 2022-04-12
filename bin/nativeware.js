@@ -11,11 +11,12 @@
 /// Dependencies...
 ///*************************************************************
 const fs = require('fs');
+const path = require('path');
 const fsp = fs.promises;
 const { asList, asStr, resolveSafePath, verifyThat } = require('./helpers');
 const { analytics, auth, jwt, listFolder, mail, safeStat, sms } = require('./workers');  
 const { Cache, FileEntry } = require('./caching');
-const { ResopnseContext } = require('./serverware');
+const { ResponseContext } = require('./serverware');
 
 
 ///*************************************************************
@@ -81,23 +82,26 @@ nativeware.account = function account(options={}) {
                 case 'code':        // POST /user/code/<username>/<code> (validate activation code)
                     let who = self.getUser(user);
                     if (verifyThat(who,'isEmpty')) throw 400;
-                    if (ctx.checkCode(opt,who.credentials.passcode) && who.status=='PENDING') {
+                    if (auth.checkCode(opt,who.credentials.passcode) && who.status=='PENDING') {
                         who.status = 'ACTIVE';
                         self.chgUser(who.username,who);
                     };
                     return {msg: `Status: ${who.status}`};
                 case 'change':      // POST /user/change (new or update or delete)
-                    if (!admin || !selfAuth) throw 401;
-                    if (!verifyThat(ctx.request.body,'isArrayofAnyObjects')) throw 400;
+                    if (!verifyThat(ctx.request.body,'isArrayOfAnyObjects')) throw 400;
                     let data = ctx.request.body;
                     let changes = [];
-                    const DEFAULTS = usersDB.query('defaults');
+                    //const DEFAULTS = usersDB.query('defaults');
+                    const DEFAULTS = {member: 'users', status: 'PENDING'}
                     for (let usr of data) {
                         let record = usr.record || usr[1]; // usr.ref||usr[0] not trusted, record.username used instead
                         if (verifyThat(record,'isTrueObject') && record.username) {
+                            record.username = record.username.toLowerCase();    // force lowercase usernames only
                             // if user exists change action, else create action...
                             let existing = usersDB.query('userByUsername',{username: record.username},true) || {};
                             let exists = verifyThat(existing,'isNotEmpty');
+                            scribble.warn(`exists: ${exists}`);
+                            if (exists && !(admin||selfAuth)) throw 401;    // authorize changes or assume new
                             self.scribe.trace("existing[%s] ==> %s", record.username, JSON.stringify(existing));
                             // authorized if: new account (not exists), user is self, or admin
                             if (!exists || (record.username==ctx.user.username) || admin) { 
@@ -123,6 +127,9 @@ nativeware.account = function account(options={}) {
                     };
                     scribble.trace("user changes:", changes);
                     return changes;
+                case 'groups':
+                    if (!admin) throw 401;
+                    let grp = ctx.request.body;
                 default: throw 400;
             };
         };
@@ -138,15 +145,16 @@ nativeware.account = function account(options={}) {
  */
 nativeware.cors = function cors(options={}) {
     if (!options.origins) this.scribe.fatal("CORS handler must be defined as null or requires origins property");
-    let origins = asList(options.origins);
+    let allowedHosts = asList(options.origins);
     let headers = asStr(options.headers||'Authorization, Content-type');
     let methods = asStr(options.methods||'POST, GET, OPTIONS');
     let credentials = options.credentials===undefined ? true : !!options.credentials;
     return async function corsMW(ctx) {
-        if (!ctx.request.origin) return await ctx.next();
-        if (origins.includes(ctx.request.origin)) {
+        let origin = ctx.request.HEADERS['origin'] || '';
+        if (!origin) return await ctx.next();
+        if (allowedHosts.includes(origin)) {
             ctx.headers({
-                'Access-Control-Allow-Origin': ctx.request.origin, 
+                'Access-Control-Allow-Origin': origin, 
                 'Access-Control-Expose-Headers': '*'    // headers browser may expose to JavaScript
             });
             if (ctx.verbIs('options')) {    // preflight check
@@ -159,7 +167,7 @@ nativeware.cors = function cors(options={}) {
             };
             return await ctx.next();
         } else {
-            throw {code: 403, msg: `Unauthorized cross-site request for ${ctx.request.origin}`};
+            throw {code: 403, msg: `Unauthorized cross-site request for ${origin}`};
         };
     };
 };
@@ -175,10 +183,12 @@ nativeware.logAnalytics = function logAnalytics(options={}) {
     let log = options.log===undefined ? ['ip','page','user'] : asList(options.log);
     scribble.info('Analytics nativeware initialized...');
     return async function logAnalyticsMW(ctx) {
+        let [ip, path, usr] =[ctx.request.remote.ip, ctx.request.pathname, ctx.user.username||'-'];
+        scribble.debug(`Analytics: ${ip} : ${path} : ${usr}`);
         log.forEach(a=>{
-            if (a=='ip') analytics.inc('ip',ctx.request.ip);
-            if (a=='page') analytics.inc('page',ctx.request.baseURL);
-            if (a=='user' && ctx.user.username) analytics.inc('user',ctx.user.username);
+            if (a=='ip') analytics.inc('ip',ip);
+            if (a=='page') analytics.inc('page',path);
+            if (a=='user') analytics.inc('user',usr);
         });
         return await ctx.next();
    };
@@ -192,14 +202,16 @@ nativeware.logAnalytics = function logAnalytics(options={}) {
  * 
  */
 nativeware.login = function login(options={}) {
-    this.scribe.info('Login nativeware initialized...');
+    let scribble = this.scribe;
+    scribble.info('Login nativeware initialized...');
     return async function loginMW(ctx) {
-        if (args.action=='logout') return {};
+        scribble.trace(`Login: ${ctx.args.action}`);
+        if (ctx.args.action=='logout') return {};
         if (!ctx.authenticated) throw 401;
         if (ctx.authenticated=='bearer' && !jwt.cfg.renewal) throw { code: 401, msg: 'Token renewal requires login' };
         ctx.jwt = jwt.create(ctx.user);
         ctx.headers({authorization: `Bearer ${ctx.jwt}`});
-        return {jwt: ctx.jwt}.mergekeys(jwt.extract(ctx.jwt)); // login response
+        return { token: ctx.jwt, payload: jwt.extract(ctx.jwt).payload };   // response: JWT (as token), and user data (payload)
     };
 };
 
@@ -221,10 +233,11 @@ nativeware.content = function content(options={}) {
     let theCache = new Cache(cache); // add pre-caching???
     scribble.info(`Content[${tag}] nativeware initialized for route '${route}' and root ${root}`);
     return async function contentMW(ctx) {
-        scribble.trace(`Content[${tag}]: ${ctx.request.method} ${ctx.request.baseURL}`);
+        scribble.trace(`Content[${tag}]: ${ctx.request.method} ${ctx.request.href}`);
+        scribble.trace(`route[${ctx.routing.route.method}]: ${ctx.routing.route.route}`);
         if (ctx.verbIs('get')) {
             if (authGet && !ctx.authorize(authGet)) throw 401;    // not authorized
-            let base = ctx.request.baseURL + (ctx.request.baseURL==='/' ? index : '');
+            let base = ctx.request.pathname + (ctx.request.pathname==='/' ? index : '');
             let fileSpec = resolveSafePath(root,base);
             let stats = await safeStat(fileSpec);
             scribble.trace(`Content[${tag}]: ${fileSpec}, ${stats && stats.isDirectory() ? 'DIR' : 'FILE'}`);
@@ -236,15 +249,15 @@ nativeware.content = function content(options={}) {
             };
             let newEntry = new FileEntry(fileSpec,{url: base, size: stats.size, time: stats.mtime});
             let oldEntry = theCache.getEntry(fileSpec);
-            let modified = !(oldEntry && oldEntry.matches(newEntry));
+            let inCache = oldEntry && oldEntry.matches(newEntry);
             ctx.headers({'Last-Modified': newEntry.modified});
             let since = ctx.request.HEADERS['if-modified-since'];
-            if (since && new Date(since)>new Date(newEntry.modified))  throw 304;   // not modified notice
+            if (since && (new Date(since)>=new Date(newEntry.modified)))  throw 304;    // not modified notice
             let etags = ctx.request.HEADERS['if-none-match'] || '';
-            let etagMatch = oldEntry && oldEntry.hasTagMatch(etags)
-            if (etags && !modified && etagMatch) throw 304;   // not modified notice
+            if (etags && newEntry.hasTagMatch(etags)) throw 304;    // not modified notice
+            // not modified, and "if-..." header included then doesn't even load into cache...
             try {        
-                if (modified) {
+                if (!inCache) {
                     let store = newEntry.size < theCache.max;
                     let compress = compressTypes.includes(newEntry.ext);
                     await newEntry.load(store,compress);
@@ -254,26 +267,36 @@ nativeware.content = function content(options={}) {
                 ctx.headers({'Cache-Control': cache.header});
                 // build return record
                 let compressed = (ctx.request.HEADERS['accept-encoding'] || '').includes('gzip');
-                let data = new ResopnseContext(oldEntry.content(compressed));
+                let data = new ResponseContext(oldEntry.content(compressed));
                 return data;
             } catch(e) { throw e; };
         } else if (ctx.verbIs('post')) {
+scribble.warn(`auth: ${authPost}, ${!ctx.authorize(authPost)}`);
             if (!authPost || !ctx.authorize(authPost)) throw 401;    // not authorized
             if (!verifyThat(ctx.request.body,'isArrayOfTrueObjects')) throw {code:400, msg: 'Array of "file" objects expected!'};
             let data = [];
             for (let f of ctx.request.body) {
-                let path = resolveSafePath(root,f.folder||ctx.request.baseURL,f.name);  // assumes baseURL OR f.folder
-                let exists = await safeStat(path);
+                let spec = resolveSafePath(root,ctx.request.pathname,f.folder,f.name);  // assumes pathname OR f.folder
+                scribble.trace(`POST[spec]: ${spec}`);
+                await fsp.mkdir(path.dirname(spec),{recursive:true});
+                let exists = await safeStat(spec);
+                scribble.trace(`POST[${exists?('EXISTS'+(f.backup?',BAK:'+f.backup:'')+(f.force?',FORCE':'')):'NEW'}]: ${spec}`);
                 if (exists && f.backup) {
-                    let backup = resolveSafePath(root,f.folder,f.backup);
-                    await fsp.copyFile(path,backup);
+                    let backup = resolveSafePath(root,ctx.request.pathname,f.folder,f.backup);
+                    await fsp.copyFile(spec,backup);
                 };
-                if (!exists || f.backup || f.force) {
-                    await fsp.copyFile(f.contents.tempFile,path);
-                    await fsp.rm(f.contents.tempFile);
+                if (!exists || f.force || f.backup) {
+                    if (typeof f.contents == 'object') {
+                        await fsp.copyFile(f.contents.tempFile,spec);
+                        await fsp.rm(f.contents.tempFile);
+                    } else {
+                        await fsp.writeFile(spec,f.contents);
+                    };
                     data.push(true);
+                    scribble.trace(`POST[${spec}]: saved...`);
                 } else {
                     data.push(false);
+                    scribble.trace(`POST[${spec}]: NOT saved, use force or backup to enable saving...`);
                 }
             };
             return data;

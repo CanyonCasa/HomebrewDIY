@@ -41,11 +41,11 @@ class FileEntry extends CacheEntry {
         this.time = new Date(def.time).style('http');
         this.mime = mimeType(this.ext);
         this.tag = hmac(this.spec+this.size+this.time);     // wrapped in double-quotes by definition
-        this.contents = { raw: undefined, compressed: undefined };
+        this.contents = { raw: undefined, gzip: undefined };
     }
 
     content(compressed){
-        let data = { compressed: compressed, contents: null, headers: {'content-type': this.mime}, 
+        let data = { compressed: compressed, contents: null, headers: {'content-type': this.mime}, size: this.size,
           streaming: this.contents.raw===undefined };
         if (data.streaming) {
             let creek = fs.createReadStream(this.spec);
@@ -57,10 +57,10 @@ class FileEntry extends CacheEntry {
                 data.contents = creek;
             };
         } else {
-            data.compressed = compressed && !!this.contents.compressed;     // only if compressed data exists
+            data.compressed = compressed && !!this.contents.gzip;     // only if compressed data exists
             if (data.compressed) {
                 data.headers.mergekeys({'content-encoding': 'gzip', etag: '"'+this.tag+'-gz"'});
-                data.contents = this.contents.compressed;
+                data.contents = this.contents.gzip;
             } else {
                 data.headers.mergekeys({etag: '"'+this.tag+'"'});
                 data.contents = this.contents.raw;
@@ -75,15 +75,15 @@ class FileEntry extends CacheEntry {
     get modified() { return this.time; }
 
     async load(store,compress) {
-        if (store) this.contents.raw = await fsp.readFile(this.spec);
-        this.contents.gz = (compress) ? await this.zip() : undefined; 
+        function zip(raw) { return new Promise((resolve,reject)=>{zlib.gzip(raw,(e,buf)=>{resolve(buf||e);})}); };
+        this.contents.raw = store ? await fsp.readFile(this.spec) : undefined;
+        this.contents.gzip = (store&&compress) ? await zip(this.contents.raw) : undefined;
     }
 
     hasTagMatch = function(tags) { return tags.split(',').map(t=>t.trim()).filter(t=>t.includes(this.tag))[0] };
 
     matches(entry) { return this.etag() == entry.etag(); };
 
-    zip() { return new Promise((resolve,reject) => { zlib.gzip(this.contents.raw,(e,buf)=>{ resolve(buf||e); }) }); }
 }
 
 class Cache {

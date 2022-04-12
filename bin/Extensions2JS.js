@@ -75,7 +75,7 @@ Date.prototype.style = function(frmt,realm) {
     let base = dx.toISOString();
     switch (frmt||'') {
         case 'form': return dx.style('YYYY-MM-DD hh:mm').split(' ');            // values for form inputs
-        case 'http': return dx.style('SD, DD SM YYYY hh:mm:ss "GMT"').replace(/(\w{3})\w+/g,'$1');
+        case 'http': return dx.style('SD, DD SM YYYY hh:mm:ss "GMT"').replace(/([a-z]{3})[a-z]+/gi,'$1');
         case 'iso': return (realm && sign==1) ? base.replace(/z/i,zx) : base;   // ISO (Zulu time) or ISO-like localtime
         case 'stamp': return dx.style(`YMMDDThh-mm-ss${(realm && sign==1)?'z':'Z'}`);   // filespec safe timestamp
         case '':  // object of date field values

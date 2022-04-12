@@ -35,7 +35,7 @@ function App(context) {
     // authentication setup required by auth & account middleware
     this.authenticating = !(context.cfg.options===null || context.cfg.options?.auth === null);
     if (this.authenticating && !this.db.users) self.scribe.fatal('Users database not found, required for authentication');
-    this.getUser = this.db.users ? (usr) => this.db.users.query('userByUsername',{username:usr}) : ()=>{};
+    this.getUser = this.db.users ? (usr) => this.db.users.query('userByUsername',{username:usr.toLowerCase()}) : ()=>{};
     this.chgUser = this.db.users ? (usr,data) => this.db.users.modify('changeUser',[{ref: usr, record: data}]) : ()=>{};
     this.build();       // build route table...
     this.start();       // start the server...
@@ -54,16 +54,16 @@ App.prototype.build = function() {
     // create and build middleware stack starting with priority built-in configurable features...
     if (analytics!==null) addRoute('any','',anw.logAnalytics(analytics));
     if (cors!==null) addRoute('any','',anw.cors(cors));
+    if (this.authenticating) {
+        addRoute('any',account.route||'/user/:action/:user?/:opt?',anw.account(account));
+        addRoute('any','/:action(login|logout)',anw.login(login));
+    };
     // custom handlers specified by configuration...
     handlers.forEach(h=>{
         let { code='', method='any', route='' } = h;
         let codeWare = acw[code] || aaw[code] || anw[code] || null;
         if (codeWare) addRoute(method.toLowerCase(),route,codeWare(h));
     });
-    if (this.authenticating) {
-        addRoute('any',account.route||'/user/:action/:user?/:opt?',anw.account(account));
-        addRoute('any','/:action(login|logout)',anw.login(login));
-    };
     if (root) addRoute('get','',anw.content({root:root}));  // default open static server, if site root defined
 };
 
@@ -72,9 +72,9 @@ App.prototype.build = function() {
  */
 App.prototype.start = function start() {
     let siteHeaders = {}.mergekeys(this.shared.headers).mergekeys(this.cfg.headers); // merge server and site headers
-    let prepRequest = sw.defineRequestPreprocessor.call(this,this.cfg.options);
-    let sendResponse = sw.defineResponseProcesser.call(this,this.cfg.options);
-    let handleError = sw.defineErrorHandler.call(this,this.cfg.options);
+    let prepRequest = sw.defineRequestPreprocessor.call(this,this.cfg);
+    let sendResponse = sw.defineResponseProcesser.call(this,this.cfg);
+    let handleError = sw.defineErrorHandler.call(this,this.cfg);
     try {
         http.createServer(async (req,res) => { // Instantiate the HTTP server with async request handler...
             // this code called for each http request...
