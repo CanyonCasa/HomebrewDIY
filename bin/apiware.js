@@ -97,8 +97,8 @@ function info(ctx) {
  * @param {object} ctx request context
  * @return {object} current mask level
  */
-function mask(ctx) {
-    let mask = this.scribe.maskLevel(ctx.authorize('server') ? ctx.args.level||ctx.args.opts[0] : '');
+function scribeMask(ctx) {
+    let mask = this.scribe.mask(ctx.authorize('server') ? ctx.args.level||ctx.args.opts[0] : '');
     return { msg: `Scribe mask: ${mask}`, mask: mask };
 };
 
@@ -201,7 +201,7 @@ apiware.api = function api(options={}) {
                 if (ctx.request.method!=='post') throw 405;
                 switch (ctx.request.params.recipe) {
                     case "grant": return await grant.call(site,ctx);
-                    case "scribe": return mask.call(site,ctx);
+                    case "scribe": return scribeMask.call(site,ctx);
                     case "mail": 
                         if (!ctx.authorize('contact')) throw 401;
                         return await sendMail.call(site,ctx.request.body||{});

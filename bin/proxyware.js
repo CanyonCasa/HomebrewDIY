@@ -23,7 +23,7 @@ const httpProxy = require('http-proxy');
 const tls = require('tls');
 const fs = require('fs');
 const fsp = fs.promises;
-const workers = require('./workers');
+const { blacklists, httpStatusMsg, Scribe, statistics } = require('./workers');
 
 
 ///*************************************************************
@@ -35,10 +35,10 @@ let proxyRouter = (tag) => {
     var self = proxies[tag];
     self.proxy.on('error',(err,req,res)=>{
         self.scribble.error('Trapped internal proxy exception!:',err.toString());
-        workers.statistics.inc(self.tag,'errors');
+        statistics.inc(self.tag,'errors');
         try {
             res.writeHead(500, "Oops!, Proxy Server Error!" ,{"Content-Type": "application/json"});
-            res.write(JSON.stringify(workers.httpStatusMsg({code: 500, msg: 'Oops!, Proxy Server Error!'})));
+            res.write(JSON.stringify(httpStatusMsg({code: 500, msg: 'Oops!, Proxy Server Error!'})));
         } catch (e) {self.scribble.error('Exception handling Proxy Exception!:',e.toString())};
         res.end();
     });
@@ -47,14 +47,14 @@ let proxyRouter = (tag) => {
         let route = self.routes[host] || self.routes['*.' + host.substr(host.indexOf('.')+1)];
         let ip = req.headers['x-forwarded-for']||req.connection.remoteAddress||'?';
         if (route) {
-          workers.statistics.inc(self.tag,'served');
+          statistics.inc(self.tag,'served');
           self.scribble.debug(`Proxy ${ip} -> ${host} -> ${method} ${url} (${route.host}:${route.port})`);
           self.proxy.web(req, res, {target: route});
         } else {
           let localIP = ip.match(/(?:192\.168|127\.\d+|10\.\d+|169\.254)\.\d+\.\d+$/);
           if (!localIP || self.cfg.verbose) { // ignore diagnostics for local addresses unless verbose
-            let probes = workers.statistics.inc(self.tag,'probes');
-            let perIP = workers.blacklists.inc(self.tag,ip);
+            let probes = statistics.inc(self.tag,'probes');
+            let perIP = blacklists.inc(self.tag,ip);
             self.scribble.dump(`NO PROXY ROUTE[${probes},${perIP}]: ${ip} -> ${host}`);
           };
           res.end(); // invalid routes close connection!
@@ -76,17 +76,17 @@ let sslContext = async function sslContext(tag) {
         let stdout = (await exec(`openssl x509 -noout -enddate -in ${self.cfg.ssl.cert}`)).stdout;
         let exp = new Date(stdout.replace(/.*=/,'').trim()).toISOString();
         self.scribble.info('SSL Certificate valid until:',exp);
-        return workers.statistics.set('proxy',self.tag,{expires: exp, loaded: now, tag: self.tag});
+        return statistics.set('proxy',self.tag,{expires: exp, loaded: now, tag: self.tag});
     } catch (e) {self.scribble.error(`Secure Proxy[${self.tag}] key/certificate file error`); throw e; };
 };
 
 let Proxy = async function(config) {
     let tag = config.tag;
-    let scribble = workers.Scribe(tag);
+    let scribble = Scribe(tag);
     let pOptions = {ws: false, hostnameOnly: true, xfwd: true}.mergekeys(config.options);
     let proxy = httpProxy.createServer(pOptions);
     proxies[tag] = { cfg: config, isSecure: !!config.ssl, proxy: proxy, routes: config.routes, scribble: scribble, tag: tag };
-    workers.statistics.set(tag,undefined,{errors: 0, probes: 0, served: 0});
+    statistics.set(tag,undefined,{errors: 0, probes: 0, served: 0});
     try {
         if (config.ssl) {   // build secure (i.e. https) context
             proxies[tag].ssl = {

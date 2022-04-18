@@ -22,8 +22,14 @@ require('./Extensions2JS');             // personal library of additions to JS l
 const os = require('os');
 const cfg = require(process.argv[2] || '../restricted/config');
 const { $VERSION } = require('./helpers');
-const { Scribe, sms, statistics } = require('./workers');   // higher levvel service workers
-const scribe = Scribe('diy');
+// load and configure workers...
+const { auth, jwt, mimeTypesExtend, Scribe, services, sms, statistics } = require('./workers');   // higher levvel service workers
+auth.cfg.mergekeys(cfg.workers.auth);
+jwt.cfg.mergekeys(cfg.workers.jwt);
+mimeTypesExtend(cfg.workers.mimeTypes);
+services({mail: cfg.workers.mail, text: cfg.workers.text});
+const scribe = Scribe(cfg.workers.scribe);  // main Scribe instance
+
 const jxDB = require('./jxDB');
 const pw = require('./proxyware');      // reverse proxy service methods
 const app = require('./app');           // default site application

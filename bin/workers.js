@@ -8,7 +8,6 @@
  * 
  * TBD...
  *      JSDOCS
- *      scribe save transcript
  */
 
 
@@ -17,7 +16,7 @@
 
 ///*************************************************************
 /// Dependencies...
-const cfg = require(process.argv[2] || '../restricted/config').workers || {};   // workers configuration
+require('./Extensions2JS');
 const frmt = require('util').format;
 const fsp = require('fs').promises;
 const path = require('path');
@@ -25,7 +24,6 @@ const qs = require('querystring');
 const https = require('https');
 const { asBytes, asList, asStyle, base64:x64, hmac, jxTo, pad, pluralize, uniqueID } = require('./helpers');
 const bcrypt = require('bcryptjs');
-const helpers = require('./helpers');
 
 
 ///*************************************************************
@@ -96,6 +94,7 @@ workers.cleanupProcess = (options={}) => { cleanup.mergekeys(options); return cl
  * @function getLoginCode returns an activation code formatted per configuration
  */
 workers.auth = {
+    cfg: { activation: {size: 6, base: 10, expiration: 10}, login: {size: 7, base: 36, expiration: 10}},
     checkCode: (challengeCode,passcode) => {
         if (!passcode) return false;
         let expires = new Date((passcode.iat+passcode.exp)*1000);
@@ -104,9 +103,11 @@ workers.auth = {
     checkPW: async (pw,hash) => await bcrypt.compare(pw,hash),
     createPW: async (pw) => await bcrypt.hash(pw,11),
     genCode: (size=7,base=10,exp=10) => ({code: uniqueID(size,base), iat: new Date().valueOf()/1000|0, exp: exp*60}),
-    getActivationCode: function() { let { size, base, expiration } = (cfg.auth||{}).activation||{}; 
+    getActivationCode: function() { 
+        let { size, base, expiration } = workers.auth.cfg.activation; 
         return this.genCode(size, base, expiration); },
-    getLoginCode: function() { let { size, base, expiration } = (cfg.auth||{}).login||{};
+    getLoginCode: function() { 
+        let { size, base, expiration } = workers.auth.cfg.login;
         return this.genCode(size, base, expiration); }
 };
 
@@ -150,7 +151,6 @@ workers.httpStatusMsg = error => {
 
 ///*************************************************************
 /// JSON Web Token handling...
-let cfgJWT = ({}).mergekeys({expiration: 60*24, secret: uniqueID(64,16)}).mergekeys(cfg.auth?.jwt); // sets defaults
 /**
  * @class jwt provides JSON Web Token (JWT) functions
  * @function create defines a new JWT
@@ -170,14 +170,14 @@ let cfgJWT = ({}).mergekeys({expiration: 60*24, secret: uniqueID(64,16)}).mergek
  * @returns {object} JWT payload if valid, null if invalid
  */
 workers.jwt = {
-    cfg: cfgJWT,    // configuration defaults used by worker
+    cfg: {expiration: 60*24, secret: uniqueID(64,16), renewal: false},  // sets defaults
     create: (data,secret,expiration) => {
         // payload always includes 'initiated at' (iat) and expiration in minutes (exp), plus data
-        let exp = expiration*60 || data.exp || cfgJWT.expiration*60;   // expiration in seconds
-        let payload = Object.assign({},data,{ iat: new Date().valueOf()/1000|0, exp: exp, ext: cfgJWT.renewal});
+        let exp = expiration*60 || data.exp || workers.jwt.cfg.expiration*60;   // expiration in seconds
+        let payload = Object.assign({},data,{ iat: new Date().valueOf()/1000|0, exp: exp, ext: workers.jwt.cfg.renewal});
         let encHeader = x64.j64u({alg: 'HS256',typ: 'JWT'});  // only support for HS256
         let encPayload = x64.j64u(payload);
-        let signature = x64.b64u(hmac(encHeader+'.'+encPayload,secret||cfgJWT.secret));
+        let signature = x64.b64u(hmac(encHeader+'.'+encPayload,secret||workers.jwt.cfg.secret));
         return [encHeader,encPayload,signature].join('.');
     },
     expired: (payload) => {  // accepts decoded payload object; returns true if expired
@@ -191,7 +191,7 @@ workers.jwt = {
     },
     verify: (jwt,secret) => { // accepts jwt token string; returns true if valid
         let [ header, payload, signature ] = (jwt+"..").split('.',3);   // encoded fields
-        let chkSignature = x64.b64u(hmac(header+'.'+payload,secret||cfgJWT.secret));
+        let chkSignature = x64.b64u(hmac(header+'.'+payload,secret||workers.jwt.cfg.secret));
         let payloadData = x64.u64j(payload);
         let expired = workers.jwt.expired(payloadData);
         return (signature===chkSignature) && !expired ? payloadData : null;
@@ -247,13 +247,14 @@ workers.listFolder = listFolder;
 
 ///*************************************************************
 /// Email Messaging Service...
+let sendgrid = null;
 const mailRequest = (payload) =>({
     protocol: 'https:',
     hostname: 'api.sendgrid.com',
     method: 'POST',
     path: '/v3/mail/send',
     headers: {
-        'Authorization': `Bearer ${cfg.sendgrid.key}`,
+        'Authorization': `Bearer ${sendgrid.key}`,
         'Content-type': 'application/json',
         'Content-Length': Buffer.from(payload).byteLength
     }
@@ -281,15 +282,15 @@ const mailSend = function(msg) {
  * @param {string} msg.to - address list, optionally msg.cc and msg.bcc as well, at least one must be defined
  * @param {string} [msg.from] - optional from address, defaults to configuration
  * @param {string} [msg.subject] - optional subject line, defaults to configuration
- * @param {string} [msg.hdr] - optional custom header, defining time or cfg.name will create default header
+ * @param {string} [msg.hdr] - optional custom header, defining time or will create default header
  * @param {string} msg.text - plain text message,
  * @param {string} [msg.html] - alternate email HTML formatted text message, 
  * @param {object} [msg.body] - email text message, as well as optional msg.text
  * @return {} - object containing a summary report and transcript of action TBD
  */
-workers.mail = !cfg.sendgrid ? async ()=>{ throw 503; } : async function mail(msg) {
+workers.mail = !sendgrid ? async ()=>{ throw 503; } : async function mail(msg) {
     // email service wrapper assumes msg provides valid 'addresses' and a 'body/text' 
-    msg.id = msg.id || cfg.sendgrid.name || ''; // format optional header with id and/or time and other defaults...
+    msg.id = msg.id || sendgrid.name || ''; // format optional header with id and/or time and other defaults...
     msg.timestamp = msg.time ? '['+new Date().toISOString()+']' : '';
     msg.hdr = msg.hdr || ((msg.id ? '@'+msg.id:'') + (msg.timestamp ? msg.timestamp:''));
     msg.content = [];
@@ -297,10 +298,10 @@ workers.mail = !cfg.sendgrid ? async ()=>{ throw 503; } : async function mail(ms
     if (msg.text) msg.content.push({type: 'text/plain', value: msg.text});
     if (msg.html) msg.content.push({type: 'text/html', value: msg.html});
     if (msg.body && typeof msg.body=='object') msg.content.push(msg.body);
-    if (!msg.content.length) msg.content.push({type: 'text/plain', value: cfg.sendgrid.text});
-    if (!(msg.to+msg.cc+msg.bcc)) msg.to = cfg.sendgrid.to;
-    msg.from = msg.from || cfg.sendgrid.from;
-    msg.subject = msg.subject || cfg.sendgrid.subject;
+    if (!msg.content.length) msg.content.push({type: 'text/plain', value: sendgrid.text});
+    if (!(msg.to+msg.cc+msg.bcc)) msg.to = sendgrid.to;
+    msg.from = msg.from || sendgrid.from;
+    msg.subject = msg.subject || sendgrid.subject;
     msg.summary = `MAIL[${msg.subject}] sent to: ${[msg.to,msg.cc,msg.bcc].filter(a=>a).join(',')}`;
     let data = {from: {email: msg.from}, subject: msg.subject, template_id: msg.templateID, content: msg.content,
         personalizations: [{ to: msg.to?asList(msg.to).map(a=>({email: a})):undefined, 
@@ -330,8 +331,13 @@ let mimes = { // define most common mimeTypes, extend/override with configuratio
     'pdf': 'application/pdf', 
     'txt': 'text/plain',
     'xml': 'application/xml'
-}.mergekeys(cfg.mimeDefs);
-Object.keys(mimes).map(e=>mimes[mimes[e]]=e);   // add keys for applications for reverse lookup of extensions
+};
+workers.mimeTypesExtend = (mimeDefs={}) => {
+    mimes.mergekeys(mimeDefs);
+    Object.keys(mimes).map(e=>mimes[mimes[e]]=e);   // add keys for applications for reverse lookup of extensions
+    return mimes;
+};
+workers.mimeTypesExtend();
 
 /**
  * @function mimeType returns the mime-type for a given extension or vice versa
@@ -343,20 +349,19 @@ workers.mimeType = (mime) => mimes[mime.replace('.','')] || mimes['bin'];   // a
 
 
 ///*************************************************************
-/// scribe, i.e. application logger ...
-// scribe singleton object (worker)...
+// scribe  i.e. application logger, singleton object (worker)...
 var scribe = {
-    tag: 'diy',
-    mask: 'log',
+    tag: 'scribe',
     transcript: {
-        file: 'diy.log',
+        file: 'scribe.log',
         bsize: 10000,
         fsize: 100000
     },
     buffer: '',
     busy: false,
-    label: 'DIY...  ',  // tag formatted for output
-    level: 3,           // mask rank equivalent for defined mask cfg
+    mask: lvl => { if (scribe.levels.includes(lvl)) scribe.level = scribe.rank(lvl); return scribe.levels[scribe.level]; },
+    label: 'SCRIBE  ',  // tag formatted for output
+    level: 3,           // rank equivalent for defined mask
     // note levels, styles, and text must track
     levels: ['dump', 'trace', 'debug', 'log', 'info', 'warn', 'error', 'fatal', 'note', 'flush'],
     rank: lvl => scribe.levels.indexOf(lvl),
@@ -395,16 +400,11 @@ var scribe = {
         if (level!='note') scribe.toTranscript(prefix + msg.replace(/\n/g,'|'), level=='fatal'||level=='flush');
     }
 };
+scribe.mask('log'); // default level
 
 // scribe instance object prototype
 const scribePrototype = {
-    maskLevel: function(mask) { 
-        if (scribe.levels.includes(mask)) {
-            scribe.mask = mask;
-            scribe.level = scribe.rank(mask);
-        };
-        return scribe.mask;
-    },
+    mask: scribe.mask,
     dump: function(...args) { scribe.write(this.label,'dump',args) },   // always transcript (only), no console output
     trace: function(...args) { scribe.write(this.label,'trace',args) },
     debug: function(...args) { scribe.write(this.label,'debug',args) },
@@ -417,37 +417,35 @@ const scribePrototype = {
     flush: function(...args) { scribe.write(this.label,'flush',args) }  // flush, always writes transcript to empty buffer
 };
 
-// IIFE to initialize scribe configuration...
-// configurable options include tag (default), mask (level), transcript: { bsize (buffer size), file, fsize (file size)}
-(() => {
-    let { tag, mask, transcript } = cfg.scribe || {};
-    scribe.tag = tag || scribe.tag;
-    scribe.label = pad(scribe.tag.toUpperCase(),8);
-    if (scribe.levels.includes(mask)) {
-        scribe.mask = mask;
-        scribe.level = scribe.rank(mask);
-    };
-    scribe.transcript.file = transcript.file || scribe.transcript.file;
-    scribe.transcript.bsize = asBytes(transcript.bsize || scribe.transcript.bsize);
-    scribe.transcript.fsize = asBytes(transcript.fsize || scribe.transcript.fsize);
-})();
-
 /**
  * @function scribe creates transcripting instances from scribe prototype
- * @param {string} tag - tag name reference for scribe output, (8 character max) 
+ * @param {object} config - main configuration, overrides defaults
+ * @param {string} config - tag name reference for scribe instances, (8 character max) 
  */
-workers.Scribe = function Scribe(tag='') {
-    return Object.create(scribePrototype).mergekeys({tag: tag, label: pad(tag.toUpperCase()||scribe.tag,8)});
+workers.Scribe = function Scribe(config={}) {
+    if (typeof config !== 'string') {   // then override any defaults with defined values of object
+        scribe.tag = config.tag || scribe.tag;
+        scribe.mask(config.mask);
+        scribe.transcript = ({}).mergekeys(scribe.transport).mergekeys(config.transcript||{});
+    };
+    let tag = (typeof config == 'string') ? config : scribe.tag;
+    return Object.create(scribePrototype).mergekeys({tag: tag, label: pad(tag.toUpperCase(),8)});
 };
 
+// define external services...
+workers.services = (config={}) => {
+    if (config.mail) sendgrid = config.mail;
+    if (config.text) twilio = config.text;
+};
 
 ///*************************************************************
 /// SMS Text Messaging service...
+let twilio = null;
 const prefix = (n)=>n && String(n).replace(/^\+{0,1}1{0,1}/,'+1'); // phone number formatting helper to prefix numbers with +1
 /**
  * @function sms sends a text message via Twilio, throws an error if Twilio module not installed
  * @param {{}} msg - message object containing numbers list and text
- * @param {[]} [msg.numbers] - optional list of numbers,array or comma delimited string, default to cfg.twilio.admin 
+ * @param {[]} [msg.numbers] - optional list of numbers,array or comma delimited string, default to twilio.admin 
  * @param {string} msg.body - required message text, alternate msg.text
  * @return {{}} - object containing a summary report and queue of action
  */
@@ -456,8 +454,8 @@ const smsRequest = (payload) =>({
     protocol: 'https:',
     hostname: 'api.twilio.com',
     method: 'POST',
-    path: '/2010-04-01/Accounts/'+cfg.twilio.accountSID+'/Messages.json',
-    auth: cfg.twilio.accountSID+':'+cfg.twilio.authToken,
+    path: '/2010-04-01/Accounts/'+twilio.accountSID+'/Messages.json',
+    auth: twilio.accountSID+':'+twilio.authToken,
     headers: {
         'Content-type': 'application/x-www-form-urlencoded',
         'Content-Length': Buffer.from(payload).byteLength
@@ -476,13 +474,13 @@ const smsSend = function(msg) {
         req.end(payload);
     });
 };
-workers.sms = !cfg.twilio ? async ()=>{ throw 503; } : async function sms(msg) {
+workers.sms = !twilio ? async ()=>{ throw 503; } : async function sms(msg) {
     // convert numbers to list, prefix, filter invalid and duplicates
-    let contacts = (cfg.twilio.callbackContacts||{})[msg.contact];
-    let numbers = asList(msg.numbers||msg.to||contacts||cfg.twilio.admin).map(p=>smsPrefix(p)).filter((v,i,a)=>v && (a.indexOf(v)==i));
-    const cb = msg.callback || cfg.twilio.callback || null; // optional server acknowledgement
+    let contacts = (twilio.callbackContacts||{})[msg.contact];
+    let numbers = asList(msg.numbers||msg.to||contacts||twilio.admin).map(p=>smsPrefix(p)).filter((v,i,a)=>v && (a.indexOf(v)==i));
+    const cb = msg.callback || twilio.callback || null; // optional server acknowledgement
     let queue = await Promise.all(numbers.map(n=>
-        smsSend({To: n, From: cfg.twilio.number, Body: msg.body||msg.text, statusCallback:cb})
+        smsSend({To: n, From: twilio.number, Body: msg.body||msg.text, statusCallback:cb})
             .then(mr=>{ mr.summary = { id:mr.sid, msg:`Text message queued to: ${n} as ${mr.sid}` }; return mr; })
             .catch(e=>{ throw e })));
     let summaries = queue.map(q=>q.summary);
@@ -490,7 +488,7 @@ workers.sms = !cfg.twilio ? async ()=>{ throw 503; } : async function sms(msg) {
         summaries: summaries }, queue: queue };
 };
 
-class Internal {
+class Internals {
 
     constructor() {
         this.data = {};
@@ -556,10 +554,10 @@ class Internal {
     clear(tag, key) { tag ? (key ? delete this.data[tag][key] : delete this.data[tag]) : Object.keys(this.data).forEach(k=>delete this.data(k)) }
 }
 
-workers.analytics = new Internal();
-workers.blacklists = new Internal();
-workers.logins = new Internal();
-workers.statistics = new Internal();
+workers.analytics = new Internals();
+workers.blacklists = new Internals();
+workers.logins = new Internals();
+workers.statistics = new Internals();
 
 workers.logins.log = function log(usr, tag, err) {
     usr = usr || 'unknown';

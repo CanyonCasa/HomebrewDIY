@@ -54,7 +54,8 @@ function scalarSafe(data,filter){
     case 'text':
       pat = /^[^\/<>]+/;
     default:
-      if ((typeof pat=='string') && pat.startsWith('/')) pat = new RegExp(pat.slice(1,pat.lastIndexOf('/')),pat.slice(pat.lastIndexOf('/')+1));
+      if ((typeof pat=='string') && pat.startsWith('/')) 
+        pat = new RegExp(pat.slice(1,pat.lastIndexOf('/')),pat.slice(pat.lastIndexOf('/')+1));
       if (typeof data!=='string' || !(pat instanceof RegExp)) return dflt||''; // only string data and regex pattern should remain...
       return rexSafe(data,pat,dflt); 
   };

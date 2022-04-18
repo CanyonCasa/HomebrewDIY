@@ -31,7 +31,7 @@ require('./Extensions2JS');
 const fs = require('fs');
 const fsp = fs.promises;
 const jsonata = require('jsonata');
-const { jxCopy, jxFrom, jxTo, jxSafe, printObj, verifyThat } = require('./helpers');
+const { jxCopy, jxTo, printObj, verifyThat } = require('./helpers');
 const { Scribe } = require('./workers');
 
 function jxDB(def={},data) {
@@ -41,23 +41,33 @@ function jxDB(def={},data) {
 
     var privateDB = dd;     // "private" data container to hide db from direct access
     var writeable = true;
-    this.file = def.file || '_memory_';      // JSON DB filespec
+    this.file = def.file || '_memory_';                         // JSON DB filespec
     this.readOnly = (enable) => { if (enable!==undefined) writeable = !enable; return writeable; };
     this.readOnly(def.readOnly);
-    this.timex = null;                          // save delay timeout timer reference
-    this.scribble = Scribe(def.tag||'db');      // transcripting reference
+    this.timex = null;                                          // saves delay timeout timer reference
+    this.scribble = Scribe(def.scribe||def.tag||'db');          // transcripting reference
 
     if ((this.file!=='_memory_') && !data) {
         try {
-            privateDB = JSON.parse(fs.readFileSync(this.file,'utf8'));
+            let source = fs.readFileSync(this.file,'utf8');
+            privateDB = jxTo(source,privateDB);
         } catch (e) { throw `ERROR loading database ${this.file}: ${e}`};
         this.watchDB(def.watch!==false);
     };
 
-    // private database access... (assumes valid args based on internal only calls!)
+    // private database interface... (assumes valid args based on internal only calls!)
     this.db = function(collection, index, value) {
-        if (collection===undefined) return privateDB;                                       // getter
-        if (collection instanceof Object) { privateDB = collection; return privateDB; };    // setter
+        if (collection===undefined) return privateDB;           // getter
+        console.log('collection:',collection);
+        if (collection && collection instanceof Object) { 
+            if ('source' in collection) {                       // setter
+                privateDB = collection.source;
+            } else {
+                privateDB.mergekeys(collection);                // set/add a collection
+            };
+        return privateDB;
+        };
+        
         // single entry change
         if (index===null) {
             privateDB[collection].push(value);      // new entry
@@ -76,7 +86,7 @@ function jxDB(def={},data) {
 jxDB.prototype.reload = async function reload() {
     try {    
         let source = await fsp.readFile(this.file,'utf8');
-        this.db(jxTo(source));
+        this.db({source: jxTo(source)});
         this.scribble.info(`jxDB.load successful: ${this.file}`);
     } catch (e) { this.scribble.warn(`jxDB.load failed: ${this.file} --> ${e.toString()}`) };
 };
