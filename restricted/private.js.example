@@ -1,0 +1,36 @@
+// this variable holds private data separate from config.js to make it easier to sanitize files shared to Github, etc
+
+// Usage... (inside config.js file)
+// const secure = require('./private.js');
+// fix all strings enclosded in < > below.
+
+var secure = {
+  contact: '<who~AT~what~DOT~net>',// obfuscated email address for admin header
+  secret: '<64-character-base-36-random-string>', // 64-byte JWT key
+  sendgrid: {
+    key: '<your-sendgrid-key>',
+    to: '<me@where.net>',
+    from: '<me@Where.net>',
+    name: '<Mickey Mouse>',
+    subject: '<Webserver Notification...>',
+    text: 'No msg provided!'
+  },
+  ssl: {                  // secure sockets files - site certificate and private key
+    key: '<path-to-privkey.pem>',
+    cert: '<path-to-fullchain.pem>'
+  },
+  twilio: {                               // twilio SMS credentials and defaults
+    accountSID: '<your-accountSID>',
+    authToken: '<your-auth-token>',
+    callback: '<https://mydomain.net/@twilio/status/callback-keyword>',
+    callbackContacts: { '<each-callback-keyword>': '<each associated-phone-number>' },
+    messagingService: '<messaging-service-key-not-presently-used>',
+    name: '<MickeyMouse>',
+    number: '<+15551234567>',
+    notifyService: '<notify-service-key-not-presently-used>',
+    admin: '<+15555555555>'  // use +15005550001 for bad number test
+    }
+  };
+
+// export as a JavaScript object, to import with require in config.json
+exports = module.exports = secure;

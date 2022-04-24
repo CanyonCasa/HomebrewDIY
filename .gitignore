@@ -1,5 +1,6 @@
 node_modules
-private.js*
+private.js
+config.js
 users.js*
 *.pem
 ~*.*

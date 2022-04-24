@@ -178,7 +178,15 @@ helpers.jxSafe = jsonSafe;
  * @param {*} value - value to fill array; may even be a function
  * @return {[]} - Array of specified size and fill
  */ 
-helpers.makeArrayOf = (size,value) => Array(size).fill().map((v,i,a)=>(typeof value=='function') ? value(v,i,a) : value);
+ helpers.makeArrayOf = (size,value) => Array(size).fill().map((v,i,a)=>(typeof value=='function') ? value(v,i,a) : value);
+
+ /**
+ * @function makeObjectFrom creates an object from an array or arrays, where array[0] defines the keys for ordered values
+ * @param {array} a - input array, where array[0] defines the array of keys
+ * @return {} - equivalent single object or array of objects
+ */ 
+helpers.makeObjectFrom = (a) =>{let x=a.slice(1).map(e=>{let o={}; a[0].forEach((k,i)=>o[k]=e[i]); return o;}); 
+  return x.length==1 ? x[0] : x; };
 
 /**
  * @function markTime for timing tasks

@@ -12,7 +12,7 @@
 ///*************************************************************
 /// Dependencies...
 ///*************************************************************
-const { asList, asTimeStr, jxCopy, jxSafe, verifyThat } = require('./helpers');
+const { asList, asTimeStr, jxFrom, jxSafe, verifyThat } = require('./helpers');
 const { analytics, auth: {genCode}, blacklists, logins, mail, sms, statistics } = require('./workers');  
 const { ResponseContext } = require('./serverware');
 const jxDB = require('./jxDB');
@@ -164,14 +164,17 @@ function twilio(ctx) {
 };
 
 async function inquire(db,ctx) {
+    let scribble = this.scribe;
     let recipe = db.lookup(ctx.args.recipe||'');    // get recipe
     if (verifyThat(recipe,'isEmpty')) throw 404;
     if (recipe.auth && !ctx.authorize(recipe.auth)) throw 401;  // check auth
     let bindings = verifyThat(ctx.request.query,'isNotEmpty') ? ctx.request.query : ctx.request.params.opts||[];
+    scribble.trace(`bindings[${bindings instanceof Array ? 'array' : typeof bindings}]: ${jxFrom(jxSafe(bindings,recipe.filter||'*'),false)}`)
     return db.query(recipe,jxSafe(bindings,recipe.filter||'*'));   // query db
 };
 
 async function cache(db,ctx) {
+    let scribble = this.scribe;
     let recipe = db.lookup(ctx.args.recipe||'');    // get recipe
     if (verifyThat(recipe,'isEmpty')) throw 404;
     if (recipe.auth && !ctx.authorize(recipe.auth)) throw 401;  // check auth
@@ -196,7 +199,7 @@ apiware.api = function api(options={}) {
     return async function apiCW(ctx) {
         scribble.trace(`route[${ctx.routing.route.method}]: ${ctx.routing.route.route}`);
         switch (ctx.request.params.prefix) {
-            case '$': return await (ctx.verbIs('get') ? inquire(db,ctx) : ctx.verbIs('post') ? cache(db,ctx) : null);
+            case '$': return await (ctx.verbIs('get') ? inquire.call(site,db,ctx) : ctx.verbIs('post') ? cache.call(site,db,ctx) : null);
             case '@':   // built-in actions
                 if (ctx.request.method!=='post') throw 405;
                 switch (ctx.request.params.recipe) {

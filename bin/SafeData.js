@@ -50,12 +50,10 @@ function scalarSafe(data,filter){
     case 'choice':                              // value must be one of a list (dflt), default to first item
       if (typeof dflt == 'string') dflt = dflt.split(',');  // dflt may be comma delimited string or array
       return (dflt.indexOf(data)==-1) ? dflt[0] : data;
-      break;
-    case 'text':
-      pat = /^[^\/<>]+/;
     default:
-      if ((typeof pat=='string') && pat.startsWith('/')) 
-        pat = new RegExp(pat.slice(1,pat.lastIndexOf('/')),pat.slice(pat.lastIndexOf('/')+1));
+      let re = (x) => new RegExp(x.slice(1,x.lastIndexOf('/')),x.slice(x.lastIndexOf('/')+1));
+      pat = pat=='id' ? /^[a-z0-9_-]+/i : pat=='text' ? /^[^\/<>]+/ :
+            ((typeof pat=='string') && pat.startsWith('/')) ? re(pat) : undefined;
       if (typeof data!=='string' || !(pat instanceof RegExp)) return dflt||''; // only string data and regex pattern should remain...
       return rexSafe(data,pat,dflt); 
   };

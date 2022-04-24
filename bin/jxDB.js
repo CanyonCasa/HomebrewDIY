@@ -40,60 +40,72 @@ function jxDB(def={},data) {
     dd['_'].delay = def.delay || dd['_'].delay || 1000;         // database write delay
 
     var privateDB = dd;     // "private" data container to hide db from direct access
+    if (data) privateDB.mergekeys(data);
     var writeable = true;
     this.file = def.file || '_memory_';                         // JSON DB filespec
-    this.readOnly = (enable) => { if (enable!==undefined) writeable = !enable; return writeable; };
+    this.readOnly = (enable) => { if (enable!==undefined) writeable = !enable; return !writeable; };
     this.readOnly(def.readOnly);
     this.timex = null;                                          // saves delay timeout timer reference
     this.scribble = Scribe(def.scribe||def.tag||'db');          // transcripting reference
 
-    if ((this.file!=='_memory_') && !data) {
+    if (this.file==='_memory_') {
+        this.watchInhibited = true;
+    } else {
+        let mode = fs.existsSync(this.file) ? 'reading' : 'writing';
         try {
-            let source = fs.readFileSync(this.file,'utf8');
-            privateDB = jxTo(source,privateDB);
-        } catch (e) { throw `ERROR loading database ${this.file}: ${e}`};
+            if (!data && (mode=='reading')) {
+                let source = fs.readFileSync(this.file,'utf8');
+                privateDB = jxTo(source, privateDB);
+            } else {
+                fs.writeFileSync(this.file, JSON.stringify(privateDB));
+            };
+        } catch (e) { throw `ERROR ${mode} database ${this.file}: ${e}`};
         this.watchDB(def.watch!==false);
     };
 
     // private database interface... (assumes valid args based on internal only calls!)
-    this.db = function(collection, index, value) {
-        if (collection===undefined) return privateDB;           // getter
-        console.log('collection:',collection);
+    this.db = function(collection, ref, value) {
+        // database and collection actions...
+        if (collection===undefined) return privateDB;               // getter
         if (collection && collection instanceof Object) { 
-            if ('source' in collection) {                       // setter
+            if ('source' in collection) {                           // setter for whole database
                 privateDB = collection.source;
             } else {
-                privateDB.mergekeys(collection);                // set/add a collection
+                if (ref===null) {
+                    Object.keys(collection).forEach(c => { privateDB[c] = collection[c]; });    // collection setter replace
+                } else {
+                    privateDB.mergekeys(collection);    // collection setter merged with existing collection
+                };
             };
-        return privateDB;
+            return privateDB;
         };
         
         // single entry change
-        if (index===null) {
-            privateDB[collection].push(value);      // new entry
+        if (ref===null) {
+            privateDB[collection].push(value);          // new entry
         } else if (value===undefined) {
-            privateDB[collection].splice(index,1);    // empty record, delete entry
+            privateDB[collection].splice(ref,1);        // empty record, delete entry
         } else {
-            privateDB[collection][index] = value;     // update entry
+            privateDB[collection][ref] = value;         // update entry
         };
-        return privateDB[collection][index];
+        return privateDB[collection][ref];
     };
 
-    this.scribble.debug(`Database ${def.tag} successfully initialized...`)
+    this.scribble.debug(`Database ${def.tag} successfully initialized...`);
 };
 
 // re-load database file into memory.
 jxDB.prototype.reload = async function reload() {
     try {    
         let source = await fsp.readFile(this.file,'utf8');
-        this.db({source: jxTo(source)});
+        this.db({source: JSON.parse(source)});  // jumps to error on parsing failure
         this.scribble.info(`jxDB.load successful: ${this.file}`);
     } catch (e) { this.scribble.warn(`jxDB.load failed: ${this.file} --> ${e.toString()}`) };
 };
 
 // watch for external changes
 jxDB.prototype.watchDB = function watchDB(enable) {
-    this.watchInhibited = false;
+    if (this.watchInhibited) return;
     if (!enable) return this.watcher ? this.watcher.close() : null;
     let self = this;
     let watchWait = null;
@@ -128,11 +140,12 @@ jxDB.prototype.save = function save() {
         return jx.slice(0,-2) + '\n}';
     };
     if ((this.file=='_memory_') || this.readOnly()) return;
-    this.watchInhibited = true;
+    if (this.watcher) this.watchInhibited = true;
     let frmt = this.db()['_'].format;
     var data = frmt=='tabular' ? tabulate(this.db()) : JSON.stringify(this.db(),null,frmt=='pretty'?2:undefined);
     fsp.writeFile(this.file,data)
-        .then(x=>{ this.scribble.trace(`jxDB.save successful: ${this.file}`); this.watchInhibited = false; })
+        .then(x=>{ this.scribble.trace(`jxDB.save successful: ${this.file}`); })
+        .then(x=>{if (this.watcher) this.watchInhibited = false; this.timex = null; })
         .catch(e=>{ this.scribble.error(`jxDB.save failed: ${this.file} --> ${e.toString()}`); });
 };
 

@@ -1,0 +1,198 @@
+// to convert to JSON, if desired, perform the following in a node shell...
+// NOTE: THIS WILL EXPOSE PRIVATE DATA AND IS NOT NECESSARY FOR USE
+// var cfg = require("./config");
+// var fs = require('fs');
+// fs.writeFileSync("config.json",JSON.stringify(cfg,null,2));
+
+let private = require('./private.js');  // private holds personal/private data making it easier to sanitize files
+
+let mimeDefs = {};  // optionally define custom mimeTypes as ext: 'mimeType', such as json: 'application/json,utf8'
+
+// required exported configuration variable...
+var cfg = {
+    workers: {                  // configuration used by the workers.js file
+        auth: {                     // authentication parameters, null to default
+            activation: {               // sets activation codes size, base, and expiration (in minutes), defaults given 
+                size: 6,
+                base: 10,
+                expiration: 10
+            },
+            login: {                // sets size, base, and expiration (in minutes) of login (grant) codes, defaults given
+                size: 7,
+                base: 36,
+                expiration: 10
+            },
+        },
+        jwt: {                      // JSON web token parameters
+            expiration: 60*24*7,        // sets JWT expiration in minutes, default 7 days
+            renewal: true,              // defines whether JWT may be renew itself on /login call
+            secret: private.secret,     // encrypting key, randomized at start if undefined; define for repeatable runs
+        },
+        scribe: {                   // transcripting/logging parameters
+            tag: 'who',                 // default tag used by transcript messages
+            mask: 'log',                // determines level of reporting detail; see documentation or code for defined levels
+            transcript: {               // transcript parameters
+                file: '../logs/who.log',    // log file location and name, recommended defaults
+                bsize: 10000,               // buffer size before output to reduce disk writes
+                fsize: 250000               // file size before transcript rollover
+            }
+        },
+        mimeTypes: mimeDefs,        // optional list of additional Mimetypes declared above
+        mail: private.sendgrid,     // optional SendGrid account configuration from private.js
+        text: private.twilio,       // optional Twilio account configuration from private.js
+    },
+    proxies: {                  // reverse proxies, "tags" do not differentiate http vs https servers, just representative
+        http: {                     // needed by Certbot authentication proxy, default reference "tag", 
+            options: {                  // defaults passed to proxy server, see http-proxy for details
+                ws: false,
+                hostnameOnly: true,
+                xfwd: true
+            },
+            port: 8080,                 // proxy server port (NO DEFAULT, use iptables to reroute to port 80 to avoid privilege port)
+            sites:['acme'],             // sites served by this proxy, must match site configurations below...
+            verbose: false              // verbose reporting and logging
+        },
+        https: {                    // https used for all backend site traffic, default "tag"
+            options: {                  // defaults passed to proxy server, see http-proxy for details
+                ws: true,
+                hostnameOnly: true,
+                xfwd: true
+            },
+            port: 8443,                 // proxy server port (NO DEFAULT, use iptables to reroute to port 443 to avoid privilege port))
+            ssl: private.ssl,           // secure sockets files that defines an HTTPS server - site certificate and private key files
+            sites:['my'],               // sites served by this proxy, must match site configurations below...
+            verbose: false              // verbose reporting and logging
+        }
+    },
+    shared: {
+        databases: {                // databases defined here available to all backends
+            users: { file: '../restricted/users.json' } // required when authentication enabled; may be site specific instead
+        },
+        headers: {                  // defines headers passed to all server backends, included in all responses.
+            // "x-powered-by" header defined internally, may be overridden here
+            admin: private.contact
+        }
+    },
+    sites: {                    // sites served, each follows the same structure
+        acme: {                     // http://home:8079 Let's Encrypt / Certbot service
+            aliases: ['home','myfakedomain.net','test.myfakedomain.net','shop.myfakedomain.net',
+              'altfakedomain.net','test.altfakedomain.net'],
+            headers: { site: 'Certbot Server' },
+            host: 'home',                   // backend server name for route
+            options: null,                  // options: null for basic server; undefined or {} for full defaults; or explicit
+            port: 8079,                     // backend server port for route
+            redirect: [/^http:/,'https:'],  // redirect 404 to (secure) host
+            root: '/home/who/sites/acme'    // place certbot files in site 'acme', .well-known folder
+        },
+        iot: {                      // note this site defined, but not proxied -- will give warning
+            aliases: ['home'],
+            databases: {                // site specific databases, available to all handlers of site, override server level
+                site: { file: '../restricted/iot.json' } // site is an expected name
+            },
+            handlers: [                 // see handler code for specific options
+               {
+                    auth: 'server',         // auth fields get|post requests; undefined == open access
+                    code: 'api',            // loads apiWare.js
+                    method: 'any',          // passes any method; individual endpoints may limit requests
+                    route: '/:prefix([$@!]):recipe/:opts*', // route definition used
+                    tag: 'api'              // tag used for transcript
+                },
+                 {
+                    auth: '|site',
+                    cache: { header: 'private, max-age=600' },
+                    code: 'content',
+                    compress: 'css,csv,hex,html,htm,js,json,pdf,txt',
+                    indexing: true,
+                    method: 'any',
+                    root: '/home/who/sites/who',
+                    route: '',
+                    tag: 'root'
+                }
+            ],
+            host: 'home',
+            options: {
+                cors: {
+                    origins: ['https://myfakedomain.net','https://altfakedomain.net']
+                },
+                limits: {
+                    request: '16K',
+                    upload: '10M'
+                },
+                temp: '../tmp'
+            },
+            port: 8399,
+        },
+        my: {
+            aliases: ['myfakedomain.net','test.myfakedomain.net','shop.myfakedomain.net',
+              'altfakedomain.net','test.altfakedomain.net','home'],   // translate to accepted proxy routes
+            databases: {        // site specific databases, available to all handlers, override server level
+                site: { file: '../restricted/my.json' }
+            },
+            handlers: [         // backend site processing; order matters, applied after builtins, before error handling
+                {
+                    code: 'api',
+                    method: 'any',
+                    route: '/:prefix([$@!]):recipe/:opts*',
+                    tag: 'api'
+                },
+                {
+                    code: 'api',
+                    database: { file: '../restricted/family.json' },
+                    method: 'any',
+                    route: '/family/:prefix([$]):recipe/:opts*',
+                    tag: 'family'
+                },
+                {
+                    auth: "|family",
+                    cache: { header: 'private, max-age=600' },
+                    code: 'content',
+                    compress: 'css,csv,hex,html,htm,js,json,pdf,txt',
+                    method: 'any',
+                    root: '/home/who/sites',
+                    route: '/family(.*)',
+                    tag: 'family'
+                },
+                {
+                    cache: { header: 'private, max-age=600' },
+                    code: 'content',
+                    compress: 'css,csv,hex,html,htm,js,json,pdf,txt',
+                    method: 'get',
+                    root: '/home/who/sites',
+                    route: '/cdn(.*)',
+                    tag: 'cdn'
+                 },
+                {
+                    auth: '|cms',
+                    //cache: { header: 'private, max-age=600' },
+                    cache: { header: 'no-cache' },
+                    code: 'content',
+                    compress: 'css,csv,hex,html,htm,js,json,pdf,txt',
+                    indexing: true,
+                    method: 'any',
+                    root: '/home/who/sites/my',
+                    route: '',
+                    tag: 'root'
+               }
+            ],
+            headers: {
+                site: 'Secure Home Server'  // optional site specific header
+            },
+            host: 'home',            // backend server name for route
+            options: {
+                cors: {
+                    origins: ['https://myfakedomain.net','https://test.myfakedomain.net','https://shop.myfakedomain.net',
+                      'https://altfakedomain.net','https://test.altfakedomain.net']
+                },
+                log: "RQST[${ctx.request.method}(${ctx.user.username||'-'})]: ${ctx.request.href}", // transcript output
+                rewrite: [
+                    {pattern: /(?<=\.net)\/(?!login)(\w+)$/, replace: '' },
+                    {pattern: /(?<=\.net)\/~(\w+)$/, replace: '/$1' }
+                ]
+            },
+            port: 8444,                     // backend server port for route
+        },
+    }
+};
+
+// export as a JSON object, same as if read from config.json
+exports = module.exports = cfg;
