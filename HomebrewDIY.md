@@ -4,6 +4,14 @@
 
 **_By Dave Campbell_**
 
+<span style="color:red; font-weight: bold">
+
+### UPDATE
+
+While this document and others referenced below may cotain useful information, the series of PowerPoint Presentations in this folder now represent the primary documentation. 
+
+</span>
+
 ### Abstract
 
 This document provides operational details for the _HomebrewDIY_ server, including configuration, database setups, and builtin middleware.
